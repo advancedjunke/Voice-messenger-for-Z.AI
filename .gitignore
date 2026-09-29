@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.exe
+*.zip
+.system_generated/
+dist/
+client/node_modules/
+server/node_modules/
