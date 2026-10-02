@@ -141,3 +141,75 @@ body {
   scrollbar-width: thin;
   scrollbar-color: #374151 transparent;
 }
+
+/* ─── v1.0.11: панель ответа / поиска (слайд сверху) ─── */
+@keyframes replyBarIn {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-reply-bar {
+  animation: replyBarIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity, transform;
+}
+
+/* ─── v1.0.11: pop бейджа непрочитанных ─── */
+@keyframes popBadge {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.15);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-pop-badge {
+  animation: popBadge 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ─── v1.0.11: мягкое появление (разделители дней) ─── */
+@keyframes fadeInSoft {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeInSoft 0.35s ease-out forwards;
+}
+
+/* ─── v1.0.11: подсветка совпадения поиска ─── */
+.search-hit {
+  background: rgba(250, 204, 21, 0.22);
+  color: #fde68a;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+/* ─── v1.0.11: вспышка при переходе к сообщению (поиск/цитата) ─── */
+@keyframes msgFlash {
+  0%, 100% {
+    background-color: transparent;
+  }
+  25%, 60% {
+    background-color: rgba(99, 102, 241, 0.14);
+  }
+}
+
+.flash-msg {
+  animation: msgFlash 1.4s ease-out forwards;
+}

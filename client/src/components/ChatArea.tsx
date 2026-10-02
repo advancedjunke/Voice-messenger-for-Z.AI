@@ -1,10 +1,14 @@
-import React, { useState, useRef, useEffect } from 'react';
-import type { User, ChatMessage, ActiveCall, MessageType } from '../types.js';
-import { Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X, Smile, Check, CheckCheck } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import type { User, ChatMessage, ActiveCall, MessageType, ReplyMeta } from '../types.js';
+import {
+  Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X, Smile,
+  Check, CheckCheck, CornerUpLeft, Trash2, Search, Ban, ChevronUp, ChevronDown,
+} from 'lucide-react';
 import { AudioMessagePlayer } from './AudioMessagePlayer.js';
 import { VoiceRecorder } from './VoiceRecorder.js';
 import { Avatar } from './Avatar.js';
 import { compressImage } from '../utils/imageCompressor.js';
+import { formatDayLabel, formatLastSeen } from '../utils/format.js';
 
 interface ChatAreaProps {
   currentUser: User;
@@ -16,8 +20,11 @@ interface ChatAreaProps {
     mediaUrl?: string;
     mediaType?: MessageType;
     duration?: number;
+    replyTo?: ReplyMeta;
   }) => void;
   onStartCall: (user: User) => void;
+  /** v1.0.11: удалить своё сообщение */
+  onDeleteMessage?: (messageId: string) => void;
   isPartnerTyping?: boolean;
   onTyping?: (recipientId: string, isTyping: boolean) => void;
 }
@@ -31,6 +38,19 @@ const EMOJIS = [
   '☕', '🍕', '⚽', '🚀', '🎮', '🎵', '🐱', '🌙',
 ];
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Короткий сниппет для цитаты ответа / превью */
+function replySnippet(m: Pick<ChatMessage, 'text' | 'mediaType' | 'deleted'>): string {
+  if (m.deleted) return 'Сообщение удалено';
+  if (m.mediaType === 'image') return m.text ? `📷 ${m.text}` : '📷 Фото';
+  if (m.mediaType === 'voice') return '🎤 Голосовое сообщение';
+  const t = (m.text || '').trim();
+  return t.length > 90 ? t.slice(0, 90) + '…' : t;
+}
+
 export const ChatArea: React.FC<ChatAreaProps> = ({
   currentUser,
   recipient,
@@ -38,6 +58,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   activeCall,
   onSendMessage,
   onStartCall,
+  onDeleteMessage,
   isPartnerTyping = false,
   onTyping,
 }) => {
@@ -47,9 +68,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [selectedLightboxImage, setSelectedLightboxImage] = useState<string | null>(null);
   const [showEmoji, setShowEmoji] = useState(false);
 
+  // v1.0.11: ответ на сообщение
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+
+  // v1.0.11: поиск по переписке
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [searchIndex, setSearchIndex] = useState(0);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const lastTypingSentRef = useRef(0);
+  // v1.0.11: refs сообщений для перехода к найденному/цитируемому
+  const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -59,17 +91,57 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     scrollToBottom();
   }, [messages, isRecordingVoice]);
 
+  // v1.0.11: id сообщений, совпадающих с поиском
+  const matchIds = useMemo(() => {
+    const q = searchText.trim().toLowerCase();
+    if (!q) return [];
+    return messages
+      .filter(m => !m.deleted && (m.text || '').toLowerCase().includes(q))
+      .map(m => m.id);
+  }, [messages, searchText]);
+
+  useEffect(() => {
+    setSearchIndex(0);
+  }, [searchText]);
+
+  const jumpToMessage = (id: string) => {
+    const el = messageRefs.current.get(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightId(id);
+    window.setTimeout(() => setHighlightId(prev => (prev === id ? null : prev)), 1400);
+  };
+
+  const handleSearchNav = (dir: 1 | -1) => {
+    if (matchIds.length === 0) return;
+    const next = (searchIndex + dir + matchIds.length) % matchIds.length;
+    setSearchIndex(next);
+    jumpToMessage(matchIds[next]);
+  };
+
   const handleSendText = (e: React.FormEvent) => {
     e.preventDefault();
     // v1.0.10: при отправке гасим индикатор «печатает…» и закрываем эмодзи-панель
     if (recipient && onTyping) onTyping(recipient.id, false);
     setShowEmoji(false);
 
+    // v1.0.11: метаданные ответа
+    const replyMeta: ReplyMeta | undefined = replyTo
+      ? {
+          id: replyTo.id,
+          senderName: replyTo.senderName,
+          text: (replyTo.text || '').trim().slice(0, 160) || undefined,
+          mediaType: replyTo.mediaType,
+        }
+      : undefined;
+    setReplyTo(null);
+
     if (previewImage) {
       onSendMessage({
         text: inputText.trim() || undefined,
         mediaUrl: previewImage,
         mediaType: 'image',
+        replyTo: replyMeta,
       });
       setPreviewImage(null);
       setInputText('');
@@ -80,6 +152,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       onSendMessage({
         text: inputText.trim(),
         mediaType: 'text',
+        replyTo: replyMeta,
       });
       setInputText('');
     }
@@ -100,6 +173,21 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const handleEmojiSelect = (emoji: string) => {
     setInputText(prev => prev + emoji);
     setShowEmoji(false);
+  };
+
+  // v1.0.11: Escape закрывает ответ / эмодзи / поиск
+  const handleInputKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      if (showEmoji) setShowEmoji(false);
+      else if (replyTo) setReplyTo(null);
+      else if (searchOpen) {
+        setSearchOpen(false);
+        setSearchText('');
+      }
+    } else if (e.key === 'Enter' && !e.shiftKey && searchOpen && searchText.trim()) {
+      e.preventDefault();
+      handleSearchNav(1);
+    }
   };
 
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -140,6 +228,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
+  // v1.0.11: подсветка совпадений поиска в тексте сообщения
+  const highlightText = (text: string): React.ReactNode => {
+    const q = searchText.trim();
+    if (!searchOpen || !q) return text;
+    const parts = text.split(new RegExp(`(${escapeRegExp(q)})`, 'ig'));
+    return parts.map((p, i) =>
+      p.toLowerCase() === q.toLowerCase() ? (
+        <mark key={i} className="search-hit">{p}</mark>
+      ) : (
+        <React.Fragment key={i}>{p}</React.Fragment>
+      )
+    );
+  };
+
   // Empty state when no chat is selected
   if (!recipient) {
     return (
@@ -163,6 +265,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const isCurrentCallWithRecipient =
     activeCall && activeCall.partnerId === recipient.id;
+  const isRecipientOnline = Boolean(recipient.online);
 
   return (
     <div
@@ -195,7 +298,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           <Avatar
             src={recipient.avatar}
             name={recipient.username}
-            status={recipient.inCallWith ? 'busy' : 'online'}
+            status={recipient.inCallWith ? 'busy' : isRecipientOnline ? 'online' : 'offline'}
             size="md"
           />
           <div>
@@ -214,31 +317,99 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </span>
               ) : recipient.inCallWith ? (
                 <span className="text-amber-400">В разговоре с другим пользователем</span>
-              ) : (
+              ) : isRecipientOnline ? (
                 <span className="text-emerald-400">В сети и готов к общению</span>
+              ) : (
+                <span className="text-gray-500">{formatLastSeen(recipient.lastSeen)}</span>
               )}
             </p>
           </div>
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {/* v1.0.11: поиск по переписке */}
+          <button
+            type="button"
+            onClick={() => {
+              setSearchOpen(v => !v);
+              if (searchOpen) setSearchText('');
+            }}
+            title="Поиск в переписке"
+            className={`p-2.5 rounded-xl transition-colors ${
+              searchOpen
+                ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
+                : 'bg-gray-800/60 text-gray-400 hover:text-indigo-300 hover:bg-gray-800'
+            }`}
+          >
+            <Search className="w-4 h-4" />
+          </button>
+
           <button
             onClick={() => onStartCall(recipient)}
-            disabled={isCurrentCallWithRecipient || !!recipient.inCallWith}
+            disabled={isCurrentCallWithRecipient || !!recipient.inCallWith || !isRecipientOnline}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all shadow-md ${
               isCurrentCallWithRecipient
                 ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 cursor-default'
-                : recipient.inCallWith
+                : !isRecipientOnline || recipient.inCallWith
                 ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
                 : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-600/20 active:scale-95'
             }`}
           >
             <Phone className="w-4 h-4" />
-            <span>{isCurrentCallWithRecipient ? 'Идет звонок' : 'Позвонить'}</span>
+            <span>{isCurrentCallWithRecipient ? 'Идет звонок' : isRecipientOnline ? 'Позвонить' : 'Не в сети'}</span>
           </button>
         </div>
       </div>
+
+      {/* v1.0.11: панель поиска по переписке */}
+      {searchOpen && (
+        <div className="px-6 py-2.5 border-b border-gray-800/80 bg-gray-950/80 backdrop-blur-md flex items-center gap-2 animate-reply-bar">
+          <Search className="w-4 h-4 text-gray-500 shrink-0" />
+          <input
+            autoFocus
+            type="text"
+            value={searchText}
+            onChange={e => setSearchText(e.target.value)}
+            onKeyDown={handleInputKeyDown}
+            placeholder="Найти сообщение в этой переписке..."
+            className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none"
+          />
+          {searchText.trim() && (
+            <span className="text-xs text-gray-500 whitespace-nowrap tabular-nums">
+              {matchIds.length > 0
+                ? `${searchIndex + 1} из ${matchIds.length}`
+                : 'Ничего не найдено'}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => handleSearchNav(-1)}
+            disabled={matchIds.length === 0}
+            title="Предыдущее совпадение"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronUp className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => handleSearchNav(1)}
+            disabled={matchIds.length === 0}
+            title="Следующее совпадение (Enter)"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronDown className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => { setSearchOpen(false); setSearchText(''); }}
+            title="Закрыть поиск"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Messages Stream */}
       <div className="flex-1 overflow-y-auto p-6">
@@ -256,8 +427,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               {recipient.username}
             </h3>
             <p className="text-xs text-gray-400 mb-6 leading-relaxed">
-              Это начало вашей личной истории переписки с <span className="text-purple-300 font-semibold">{recipient.username}</span>.
-              Начните общение или помашите ручкой, чтобы поздороваться!
+              {isRecipientOnline ? (
+                <>Это начало вашей личной истории переписки с <span className="text-purple-300 font-semibold">{recipient.username}</span>.
+                Начните общение или помашите ручкой, чтобы поздороваться!</>
+              ) : (
+                <><span className="text-gray-300 font-semibold">{recipient.username}</span> сейчас не в сети — напишите сообщение, и он(а) увидит его, когда зайдёт.</>
+              )}
             </p>
 
             {/* Discord-style wave button */}
@@ -275,131 +450,236 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </button>
           </div>
         ) : (
-          messages.map((msg, idx) => {
-            // FIX: сравниваем по СТАБИЛЬНОМУ имени (socket.id меняется при реконнекте)
-            const isMe = msg.senderName === currentUser.username;
-            const isWave = msg.mediaUrl === '/wave.webp';
+          (() => {
+            let prevMsg: ChatMessage | null = null;
+            let lastDay = '';
+            return messages.map((msg, idx) => {
+              const isMe = msg.senderName === currentUser.username;
+              const isWave = msg.mediaUrl === '/wave.webp' && !msg.deleted;
 
-            // v1.0.10: группировка подряд идущих сообщений одного автора (как в Telegram/Discord)
-            const prevMsg = idx > 0 ? messages[idx - 1] : null;
-            const isGrouped = Boolean(
-              prevMsg &&
-              !isWave &&
-              prevMsg.senderName === msg.senderName &&
-              msg.mediaType !== 'image' &&
-              (msg.timestamp - prevMsg.timestamp) < 3 * 60 * 1000
-            );
-            const isFirst = idx === 0;
-            const rowMargin = isFirst || !isGrouped ? 'mt-0' : 'mt-0.5';
+              // v1.0.11: разделитель дней (Сегодня / Вчера / дата)
+              const day = new Date(msg.timestamp).toDateString();
+              const dayChanged = day !== lastDay;
+              if (dayChanged) lastDay = day;
 
-            // v1.0.10: галочка прочтения для своих сообщений
-            const receipt = isMe ? (
-              msg.read ? (
-                <CheckCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-label="Прочитано" />
-              ) : (
-                <Check className="w-3.5 h-3.5 text-gray-500 shrink-0" aria-label="Отправлено" />
-              )
-            ) : null;
+              // v1.0.10: группировка подряд идущих сообщений одного автора
+              const isGrouped = Boolean(
+                prevMsg &&
+                !isWave &&
+                !dayChanged &&
+                prevMsg.senderName === msg.senderName &&
+                msg.mediaType !== 'image' &&
+                (msg.timestamp - prevMsg.timestamp) < 3 * 60 * 1000
+              );
+              const rowMargin = idx === 0 || !isGrouped ? (dayChanged ? 'mt-4' : 'mt-0') : 'mt-0.5';
 
-            return (
-              <div
-                key={msg.id}
-                className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'} ${rowMargin} ${idx === messages.length - 1 ? 'animate-msg-in' : ''}`}
-              >
-                {/* Sender Avatar (в группировке — прозрачный распорка) */}
-                {isGrouped ? (
-                  <div className="w-8 shrink-0" aria-hidden />
+              // запоминаем предыдущее сообщение для группировки на следующей итерации
+              const prevForNext = msg;
+
+              // v1.0.10: галочка прочтения для своих сообщений
+              const receipt = isMe && !msg.deleted ? (
+                msg.read ? (
+                  <CheckCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-label="Прочитано" />
                 ) : (
-                  <Avatar
-                    src={isMe ? currentUser.avatar : (msg.senderAvatar || recipient.avatar)}
-                    name={isMe ? currentUser.username : msg.senderName}
-                    size="sm"
-                    className="mb-1 shrink-0"
-                  />
-                )}
+                  <Check className="w-3.5 h-3.5 text-gray-500 shrink-0" aria-label="Отправлено" />
+                )
+              ) : null;
 
-                <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
-                  {!isGrouped && (
-                    <div className="flex items-baseline gap-2 mb-1 px-1">
-                      <span className="text-xs font-semibold text-gray-400">
-                        {isMe ? 'Вы' : msg.senderName}
-                      </span>
-                      <span className="text-[11px] text-gray-500">
-                        {formatTime(msg.timestamp)}
-                      </span>
-                      {receipt}
-                    </div>
-                  )}
-
-                  {isWave ? (
-                    /* Discord-style wave greeting card */
-                    <div
-                      className={`p-3 rounded-2xl shadow-lg border transition-all ${
-                        isMe
-                          ? 'bg-purple-950/40 border-purple-500/40 text-purple-100 rounded-tr-none'
-                          : 'bg-gray-900/90 border-gray-800 text-gray-100 rounded-tl-none'
-                      }`}
-                    >
-                      <div className="flex flex-col items-center gap-2">
-                        <img
-                          src="/wave.webp"
-                          alt="Wave greeting"
-                          className="w-28 h-auto object-contain rounded-xl hover:scale-105 transition-transform drop-shadow"
-                        />
-                        <span className="text-xs font-semibold tracking-wide text-center px-2 py-0.5 bg-black/40 rounded-lg text-purple-200">
-                          {msg.text || `👋 ${msg.senderName} машет ручкой!`}
-                        </span>
-                      </div>
-                    </div>
+              const node = (
+                <div
+                  key={msg.id}
+                  ref={el => {
+                    if (el) messageRefs.current.set(msg.id, el);
+                    else messageRefs.current.delete(msg.id);
+                  }}
+                  className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'} ${rowMargin} ${idx === messages.length - 1 ? 'animate-msg-in' : ''} ${highlightId === msg.id ? 'flash-msg rounded-2xl' : ''}`}
+                >
+                  {/* Sender Avatar (в группировке — прозрачный распорка) */}
+                  {isGrouped ? (
+                    <div className="w-8 shrink-0" aria-hidden />
                   ) : (
-                    <div
-                      title={`${msg.senderName} · ${formatTime(msg.timestamp)}`}
-                      className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words transition-shadow hover:shadow-lg ${
-                        isMe
-                          ? 'bg-gradient-to-br from-indigo-600 to-purple-600 text-white ' + (isGrouped ? 'rounded-tr-xl' : 'rounded-tr-none')
-                          : 'bg-gray-900 border border-gray-800 text-gray-200 ' + (isGrouped ? 'rounded-tl-xl' : 'rounded-tl-none')
-                      }`}
-                    >
-                      {/* Image Attachment */}
-                      {msg.mediaType === 'image' && msg.mediaUrl && (
-                        <div className="mb-2">
+                    <Avatar
+                      src={isMe ? currentUser.avatar : (msg.senderAvatar || recipient.avatar)}
+                      name={isMe ? currentUser.username : msg.senderName}
+                      size="sm"
+                      className="mb-1 shrink-0"
+                    />
+                  )}
+
+                  <div className={`relative flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%] group/msg`}>
+                    {!isGrouped && (
+                      <div className="flex items-baseline gap-2 mb-1 px-1">
+                        <span className="text-xs font-semibold text-gray-400">
+                          {isMe ? 'Вы' : msg.senderName}
+                        </span>
+                        <span className="text-[11px] text-gray-500">
+                          {formatTime(msg.timestamp)}
+                        </span>
+                        {receipt}
+                      </div>
+                    )}
+
+                    {/* v1.0.11: hover-действия — ответить / удалить */}
+                    {!msg.deleted && (
+                      <div
+                        className={`absolute -top-1 ${isMe ? '-left-11' : '-right-11'} hidden sm:flex flex-col gap-1 opacity-0 translate-y-1 group-hover/msg:opacity-100 group-hover/msg:translate-y-0 transition-all duration-150`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setReplyTo(msg)}
+                          title="Ответить"
+                          className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-indigo-300 hover:border-indigo-500/50 transition-colors"
+                        >
+                          <CornerUpLeft className="w-3.5 h-3.5" />
+                        </button>
+                        {isMe && onDeleteMessage && (
+                          <button
+                            type="button"
+                            onClick={() => onDeleteMessage(msg.id)}
+                            title="Удалить сообщение"
+                            className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-red-400 hover:border-red-500/50 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {msg.deleted ? (
+                      /* v1.0.11: удалённое сообщение */
+                      <div className="px-4 py-2.5 rounded-2xl border border-dashed border-gray-700 bg-gray-900/40 text-gray-500 text-sm italic flex items-center gap-2">
+                        <Ban className="w-4 h-4 shrink-0" aria-hidden />
+                        <span>Сообщение удалено</span>
+                      </div>
+                    ) : isWave ? (
+                      /* Discord-style wave greeting card */
+                      <div
+                        className={`p-3 rounded-2xl shadow-lg border transition-all ${
+                          isMe
+                            ? 'bg-purple-950/40 border-purple-500/40 text-purple-100 rounded-tr-none'
+                            : 'bg-gray-900/90 border-gray-800 text-gray-100 rounded-tl-none'
+                        }`}
+                      >
+                        <div className="flex flex-col items-center gap-2">
                           <img
-                            src={msg.mediaUrl}
-                            alt="Photo"
-                            onClick={() => setSelectedLightboxImage(msg.mediaUrl || null)}
-                            className="rounded-xl max-h-72 w-auto object-cover cursor-pointer hover:opacity-95 transition-opacity border border-black/20"
+                            src="/wave.webp"
+                            alt="Wave greeting"
+                            className="w-28 h-auto object-contain rounded-xl hover:scale-105 transition-transform drop-shadow"
                           />
+                          <span className="text-xs font-semibold tracking-wide text-center px-2 py-0.5 bg-black/40 rounded-lg text-purple-200">
+                            {msg.text || `👋 ${msg.senderName} машет ручкой!`}
+                          </span>
                         </div>
-                      )}
+                      </div>
+                    ) : (
+                      <div
+                        title={`${msg.senderName} · ${formatTime(msg.timestamp)}`}
+                        className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words transition-shadow hover:shadow-lg ${
+                          isMe
+                            ? 'bg-gradient-to-br from-indigo-600 to-purple-600 text-white ' + (isGrouped ? 'rounded-tr-xl' : 'rounded-tr-none')
+                            : 'bg-gray-900 border border-gray-800 text-gray-200 ' + (isGrouped ? 'rounded-tl-xl' : 'rounded-tl-none')
+                        }`}
+                      >
+                        {/* v1.0.11: цитата ответа */}
+                        {msg.replyTo && (
+                          <div
+                            onClick={() => jumpToMessage(msg.replyTo!.id)}
+                            title="Перейти к сообщению"
+                            className={`mb-1.5 px-2.5 py-1.5 rounded-lg border-l-[3px] cursor-pointer transition-colors ${
+                              isMe
+                                ? 'bg-black/20 border-white/70 hover:bg-black/30'
+                                : 'bg-gray-800/80 border-indigo-400/80 hover:bg-gray-800'
+                            }`}
+                          >
+                            <p className="text-[11px] font-semibold text-indigo-300 leading-tight">
+                              {msg.replyTo.senderName === currentUser.username ? 'Вы' : msg.replyTo.senderName}
+                            </p>
+                            <p className="text-[11px] text-gray-300/90 leading-snug">
+                              {replySnippet({ text: msg.replyTo.text, mediaType: msg.replyTo.mediaType, deleted: false })}
+                            </p>
+                          </div>
+                        )}
 
-                      {/* Voice Note */}
-                      {msg.mediaType === 'voice' && msg.mediaUrl && (
-                        <AudioMessagePlayer
-                          src={msg.mediaUrl}
-                          duration={msg.duration}
-                          isMe={isMe}
-                        />
-                      )}
+                        {/* Image Attachment */}
+                        {msg.mediaType === 'image' && msg.mediaUrl && (
+                          <div className="mb-2">
+                            <img
+                              src={msg.mediaUrl}
+                              alt="Photo"
+                              onClick={() => setSelectedLightboxImage(msg.mediaUrl || null)}
+                              className="rounded-xl max-h-72 w-auto object-cover cursor-pointer hover:opacity-95 transition-opacity border border-black/20"
+                            />
+                          </div>
+                        )}
 
-                      {/* Text content if present */}
-                      {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
-                    </div>
-                  )}
+                        {/* Voice Note */}
+                        {msg.mediaType === 'voice' && msg.mediaUrl && (
+                          <AudioMessagePlayer
+                            src={msg.mediaUrl}
+                            duration={msg.duration}
+                            isMe={isMe}
+                          />
+                        )}
 
-                  {/* v1.0.10: в группировке время + галочка — под пузырём */}
-                  {isGrouped && (
-                    <div className={`flex items-center gap-1 px-1 mt-0.5 ${isMe ? 'flex-row-reverse' : ''}`}>
-                      <span className="text-[10px] text-gray-600">{formatTime(msg.timestamp)}</span>
-                      {receipt}
-                    </div>
-                  )}
+                        {/* Text content if present */}
+                        {msg.text && <p className="whitespace-pre-wrap">{highlightText(msg.text)}</p>}
+                      </div>
+                    )}
+
+                    {/* v1.0.10: в группировке время + галочка — под пузырём */}
+                    {isGrouped && !msg.deleted && (
+                      <div className={`flex items-center gap-1 px-1 mt-0.5 ${isMe ? 'flex-row-reverse' : ''}`}>
+                        <span className="text-[10px] text-gray-600">{formatTime(msg.timestamp)}</span>
+                        {receipt}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })
+              );
+
+              prevMsg = prevForNext;
+              // если день изменился — сначала вставляем разделитель
+              if (dayChanged) {
+                const separator = (
+                  <div key={`day_${day}`} className="flex items-center gap-3 my-4 animate-fade-in">
+                    <div className="h-px flex-1 bg-gray-800/80" />
+                    <span className="px-3 py-1 bg-gray-900/80 border border-gray-800 rounded-full text-[11px] text-gray-400 font-medium whitespace-nowrap">
+                      {formatDayLabel(msg.timestamp)}
+                    </span>
+                    <div className="h-px flex-1 bg-gray-800/80" />
+                  </div>
+                );
+                return <React.Fragment key={`frag_${msg.id}`}>{separator}{node}</React.Fragment>;
+              }
+              return node;
+            });
+          })()
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* v1.0.11: панель ответа на сообщение */}
+      {replyTo && (
+        <div className="mx-4 mb-1 px-3 py-2 bg-gray-900/90 border-l-4 border-indigo-500 rounded-r-xl flex items-center gap-2.5 animate-reply-bar shadow-lg">
+          <CornerUpLeft className="w-4 h-4 text-indigo-400 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold text-indigo-300 leading-tight">
+              {replyTo.senderName === currentUser.username ? 'Отвечаете себе' : `Ответ ${replyTo.senderName}`}
+            </p>
+            <p className="text-xs text-gray-400 truncate leading-snug">
+              {replySnippet(replyTo)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setReplyTo(null)}
+            title="Отменить ответ"
+            className="p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 transition-colors shrink-0"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Image Preview bar when attaching a picture before sending */}
       {previewImage && (
@@ -424,7 +704,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Message Input / Voice Recorder Area */}
-      <div className="p-4 border-t border-gray-800/80 bg-gray-950/60 backdrop-blur-md">
+      <div className={`p-4 border-t border-gray-800/80 bg-gray-950/60 backdrop-blur-md ${replyTo ? 'pt-2' : ''}`}>
         {isRecordingVoice ? (
           <VoiceRecorder
             onSendVoice={handleSendVoice}
@@ -518,6 +798,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               type="text"
               value={inputText}
               onChange={e => handleInputChange(e.target.value)}
+              onKeyDown={handleInputKeyDown}
               placeholder={previewImage ? 'Добавить подпись...' : `Сообщение для ${recipient.username}...`}
               className="flex-1 px-4 py-3 bg-gray-900/90 border border-gray-800 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
             />

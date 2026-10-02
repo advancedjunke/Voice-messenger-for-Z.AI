@@ -1,6 +1,6 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
-import { ChatMessage, User } from './types.js';
+import { ChatMessage, KnownUser, User } from './types.js';
 
 dotenv.config();
 
@@ -105,6 +105,12 @@ export async function initDatabase() {
           timestamp BIGINT NOT NULL
         );
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_avatar TEXT;
+        -- v1.0.11: ответы на сообщения, удаление, время последнего визита
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id VARCHAR(100);
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_sender VARCHAR(100);
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_media_type VARCHAR(50);
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_key);
       `);
 
@@ -181,8 +187,9 @@ export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
   if (!pool || !isDbConnected) return;
   try {
     await withRetry(() => pool!.query(
-      `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp,
+                            reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (id) DO NOTHING`,
       [
         msg.id,
@@ -196,10 +203,70 @@ export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
         msg.mediaType || 'text',
         msg.duration || null,
         msg.timestamp,
+        msg.replyTo?.id || null,
+        msg.replyTo?.senderName || null,
+        msg.replyTo?.text || null,
+        msg.replyTo?.mediaType || null,
+        Boolean(msg.deleted),
       ]
     ));
   } catch (err) {
     console.error('[Neon DB] Ошибка сохранения сообщения:', err);
+  }
+}
+
+// v1.0.11: пометить сообщение удалённым (контент стираем, сам факт остаётся)
+export async function dbMarkMessageDeleted(conversationKey: string, messageId: string) {
+  if (!pool || !isDbConnected) return;
+  try {
+    await withRetry(() => pool!.query(
+      `UPDATE messages
+       SET deleted = TRUE, text = NULL, media_url = NULL, duration = NULL
+       WHERE id = $1 AND conversation_key = $2`,
+      [messageId, conversationKey]
+    ));
+  } catch (err) {
+    console.error('[Neon DB] Ошибка удаления сообщения:', err);
+  }
+}
+
+// v1.0.11: обновить только время последнего визита (не трогая аватар/пароль)
+export async function dbSetLastSeen(username: string) {
+  if (!pool || !isDbConnected) {
+    const prev = localUsers.get(username.toLowerCase());
+    if (prev) prev.lastSeen = Date.now();
+    return;
+  }
+  try {
+    await withRetry(() => pool!.query(
+      `UPDATE users SET last_seen = $2 WHERE username = $1`,
+      [username, Date.now()]
+    ));
+  } catch (err) {
+    console.error('[Neon DB] Ошибка обновления last_seen:', err);
+  }
+}
+
+// v1.0.11: известные пользователи (включая офлайн) для сайдбара
+export async function dbGetKnownUsers(limit = 30): Promise<KnownUser[]> {
+  if (!pool || !isDbConnected) {
+    return Array.from(localUsers.values())
+      .sort((a, b) => b.lastSeen - a.lastSeen)
+      .slice(0, limit)
+      .map(u => ({ username: u.username, avatar: u.avatar, lastSeen: u.lastSeen }));
+  }
+  try {
+    const res = await withRetry(() => pool!.query(
+      `SELECT username, avatar, last_seen as "lastSeen"
+       FROM users
+       ORDER BY last_seen DESC
+       LIMIT $1`,
+      [limit]
+    ));
+    return res.rows;
+  } catch (err) {
+    console.error('[Neon DB] Ошибка получения известных пользователей:', err);
+    return [];
   }
 }
 
@@ -208,14 +275,28 @@ export async function dbGetHistory(conversationKey: string, limit = 200): Promis
   try {
     const res = await withRetry(() => pool!.query(
       `SELECT id, sender_id as "senderId", sender_name as "senderName", sender_avatar as "senderAvatar", recipient_id as "recipientId",
-              text, media_url as "mediaUrl", media_type as "mediaType", duration, timestamp
+              text, media_url as "mediaUrl", media_type as "mediaType", duration, timestamp,
+              reply_to_id as "replyToId", reply_to_sender as "replyToSender", reply_to_text as "replyToText",
+              reply_to_media_type as "replyToMediaType", deleted
        FROM messages
        WHERE conversation_key = $1
        ORDER BY timestamp ASC
        LIMIT $2`,
       [conversationKey, limit]
     ));
-    return res.rows;
+    // v1.0.11: восстанавливаем вложенную структуру replyTo из плоских колонок
+    return res.rows.map((row: any) => {
+      const { replyToId, replyToSender, replyToText, replyToMediaType, ...rest } = row;
+      if (replyToId) {
+        rest.replyTo = {
+          id: replyToId,
+          senderName: replyToSender || '',
+          text: replyToText || undefined,
+          mediaType: replyToMediaType || undefined,
+        };
+      }
+      return rest as ChatMessage;
+    });
   } catch (err) {
     console.error('[Neon DB] Ошибка загрузки истории сообщений:', err);
     return [];
@@ -272,6 +353,20 @@ export async function dbGetReleasePayload(version: string): Promise<string | nul
   } catch (err) {
     console.error('[Neon DB] Ошибка получения файла релиза:', err);
     return null;
+  }
+}
+
+// v1.0.11: удалить релиз (очистка тестовых/битых публикаций)
+export async function dbDeleteRelease(version: string): Promise<boolean> {
+  if (!pool || !isDbConnected) {
+    return localReleases.delete(version);
+  }
+  try {
+    await pool.query(`DELETE FROM app_releases WHERE version = $1`, [version]);
+    return true;
+  } catch (err) {
+    console.error('[Neon DB] Ошибка удаления релиза:', err);
+    return false;
   }
 }
 

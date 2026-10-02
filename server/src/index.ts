@@ -6,8 +6,8 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
-import { User, ChatMessage } from './types.js';
-import { initDatabase, dbSaveUser, dbGetUser, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease } from './db.js';
+import { User, ChatMessage, ReplyMeta, KnownUser } from './types.js';
+import { initDatabase, dbSaveUser, dbGetUser, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -143,6 +143,21 @@ app.post('/api/updates/publish', async (req, res) => {
   }
 });
 
+// v1.0.11: удалить релиз (очистка тестовых/битых публикаций, чтобы клиенты
+// не видели фантомный бейдж «Обновление»)
+app.delete('/api/updates/publish/:version', async (req, res) => {
+  try {
+    const version = req.params.version;
+    if (!version) {
+      return res.status(400).json({ error: 'Version is required' });
+    }
+    const success = await dbDeleteRelease(version);
+    res.json({ success, version });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 io.on('connection', (socket: Socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
 
@@ -173,11 +188,9 @@ io.on('connection', (socket: Socket) => {
     if (!userAvatar && existingDbUser?.avatar) {
       userAvatar = existingDbUser.avatar;
     }
-    // Сохраняем пользователя при наличии аватара ИЛИ пароля
-    // (fix: раньше пароль сохранялся только вместе с аватаром)
-    if (userAvatar || password) {
-      await dbSaveUser(cleanName, userAvatar, password ? hashPassword(password) : undefined);
-    }
+    // Сохраняем пользователя всегда — так last_seen обновляется при каждом входе,
+    // и пользователь попадает в список «известных» (сайдбар с офлайн-собеседниками)
+    await dbSaveUser(cleanName, userAvatar, password ? hashPassword(password) : undefined);
 
     // ─── Fix: same name opened twice (second tab / reconnect) — replace the old session ───
     for (const [sId, u] of usersBySocketId.entries()) {
@@ -217,6 +230,12 @@ io.on('connection', (socket: Socket) => {
     });
 
     broadcastUsersList();
+
+    // v1.0.11: сразу отправляем список известных (в т.ч. офлайн) пользователей
+    try {
+      const known = await dbGetKnownUsers(30);
+      socket.emit('users:known_list', { users: known });
+    } catch { /* не критично */ }
   });
 
   // 1.1. Update User Avatar
@@ -247,46 +266,85 @@ io.on('connection', (socket: Socket) => {
     socket.emit('chat:history_loaded', { recipientId: otherName, messages: history });
   });
 
+  // v1.0.11: список известных пользователей (в т.ч. офлайн) по запросу
+  socket.on('users:known', async () => {
+    try {
+      const known = await dbGetKnownUsers(30);
+      socket.emit('users:known_list', { users: known });
+    } catch { /* не критично */ }
+  });
+
   // 3. Send Direct Message
+  // v1.0.11: получателя можно указать И ПО socket.id, И ПО имени — теперь можно
+  // писать офлайн-собеседнику (сообщение сохранится и будет доставлено в историю).
   socket.on(
     'chat:send',
     ({
       recipientId,
+      recipientUsername,
       text,
       mediaUrl,
       mediaType,
       duration,
+      replyTo,
     }: {
-      recipientId: string;
+      recipientId?: string;
+      recipientUsername?: string;
       text?: string;
       mediaUrl?: string;
       mediaType?: 'text' | 'image' | 'voice';
       duration?: number;
+      replyTo?: ReplyMeta;
     }) => {
       const sender = usersBySocketId.get(socket.id);
-      const recipientUser = usersBySocketId.get(recipientId);
-      if (!sender || !recipientUser) return;
+      if (!sender) return;
+
+      // Поиск получателя: по socket.id или по стабильному имени (в т.ч. офлайн)
+      const recipientUser =
+        (recipientId && usersBySocketId.get(recipientId)) ||
+        Array.from(usersBySocketId.values()).find(
+          u => u.username.toLowerCase() === (recipientUsername || '').toLowerCase()
+        );
+      const offlineName = (recipientUsername || '').trim().slice(0, 24);
+      if (!recipientUser && !offlineName) return;
+
+      const recipientName = recipientUser ? recipientUser.username : offlineName;
+      // Нельзя писать самому себе
+      if (recipientName.toLowerCase() === sender.username.toLowerCase()) return;
 
       const trimmedText = (text || '').trim();
       if (!trimmedText && !mediaUrl) return;
+
+      // v1.0.11: валидируем и нормализуем метаданные ответа (сниппет ≤ 160 символов)
+      let replyMeta: ReplyMeta | undefined;
+      if (replyTo && typeof replyTo.id === 'string' && replyTo.id.length <= 100) {
+        const qt = (replyTo.text || '').trim().slice(0, 160);
+        replyMeta = {
+          id: replyTo.id,
+          senderName: (replyTo.senderName || '').slice(0, 24),
+          text: qt || undefined,
+          mediaType: replyTo.mediaType,
+        };
+      }
 
       const message: ChatMessage = {
         id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         senderId: sender.id,
         senderName: sender.username,
         senderAvatar: sender.avatar,
-        recipientId: recipientUser.id,
-        recipientName: recipientUser.username,
+        recipientId: recipientUser?.id || recipientName,
+        recipientName,
         text: trimmedText || undefined,
         mediaUrl: mediaUrl || undefined,
         mediaType: mediaType || 'text',
         duration: duration || undefined,
         read: false,
+        replyTo: replyMeta,
         timestamp: Date.now(),
       };
 
       // Conversation key is based on usernames → history survives reconnects
-      const key = getConversationKey(sender.username, recipientUser.username);
+      const key = getConversationKey(sender.username, recipientName);
       const existing = messageHistory.get(key) || [];
       existing.push(message);
       // Keep last 200 messages per conversation
@@ -296,12 +354,50 @@ io.on('connection', (socket: Socket) => {
       // Save to Neon PostgreSQL asynchronously
       dbSaveMessage(message, key).catch(err => console.error('[Neon DB Save Message Error]', err));
 
-      // Deliver to recipient if online
-      socket.to(recipientId).emit('chat:receive', message);
-      // Echo back to sender
+      // Deliver to recipient if online (офлайн-собеседник увидит сообщение в истории)
+      if (recipientUser) {
+        socket.to(recipientUser.id).emit('chat:receive', message);
+      }
+      // Echo back to sender (всегда — и для офлайн-отправки)
       socket.emit('chat:receive', message);
     }
   );
+
+  // v1.0.11: удаление своего сообщения (мягкое — остаётся «Сообщение удалено»)
+  socket.on('chat:delete', ({ partnerUsername, messageId }: { partnerUsername: string; messageId: string }) => {
+    const user = usersBySocketId.get(socket.id);
+    if (!user || !partnerUsername || !messageId) return;
+
+    const key = getConversationKey(user.username, partnerUsername);
+    const history = messageHistory.get(key);
+    const msg = history?.find(m => m.id === messageId);
+
+    // Удалять можно только СВОЁ сообщение
+    if (!msg || msg.senderName.toLowerCase() !== user.username.toLowerCase() || msg.deleted) {
+      socket.emit('chat:delete_failed', {
+        messageId,
+        message: 'Можно удалять только свои сообщения',
+      });
+      return;
+    }
+
+    msg.deleted = true;
+    msg.text = undefined;
+    msg.mediaUrl = undefined;
+    msg.duration = undefined;
+    msg.replyTo = undefined;
+
+    dbMarkMessageDeleted(key, messageId).catch(err => console.error('[Neon DB Delete Message Error]', err));
+    console.log(`[Message Deleted] ${user.username} удалил ${messageId}`);
+
+    // уведомляем отправителя (эхо) и все сокеты собеседника
+    socket.emit('chat:message_deleted', { messageId, partnerUsername });
+    for (const [sId, u] of usersBySocketId.entries()) {
+      if (u.username.toLowerCase() === partnerUsername.toLowerCase()) {
+        io.to(sId).emit('chat:message_deleted', { messageId, partnerUsername: user.username });
+      }
+    }
+  });
 
   // 3.5 Typing indicator — relay only, без состояния на сервере
   socket.on('chat:typing', ({ recipientId, isTyping }: { recipientId: string; isTyping: boolean }) => {
@@ -498,6 +594,8 @@ io.on('connection', (socket: Socket) => {
         }
       }
       usersBySocketId.delete(socket.id);
+      // v1.0.11: фиксируем время последнего визита (для «был(а) в сети»)
+      dbSetLastSeen(user.username).catch(() => {});
       broadcastUsersList();
     }
   });

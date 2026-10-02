@@ -1,12 +1,16 @@
 import React, { useState } from 'react';
-import type { User } from '../types.js';
-import { Phone, Search, Users, LogOut, Settings, Bell, BellOff } from 'lucide-react';
+import type { User, KnownUser } from '../types.js';
+import { Phone, Search, Users, LogOut, Settings, Bell, BellOff, Clock } from 'lucide-react';
 import { Avatar } from './Avatar.js';
+import { formatLastSeen } from '../utils/format.js';
 
 interface SidebarProps {
   currentUser: User;
   users: User[];
-  selectedUserId: string | null;
+  /** v1.0.11: известные пользователи из БД (в т.ч. офлайн) */
+  knownUsers?: KnownUser[];
+  /** v1.0.11: выбор теперь по СТАБИЛЬНОМУ имени (офлайн-пользователь не имеет socket.id) */
+  selectedUsername?: string | null;
   unreadCounts: Record<string, number>;
   onSelectUser: (user: User) => void;
   onStartCall: (user: User) => void;
@@ -27,7 +31,8 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({
   currentUser,
   users,
-  selectedUserId,
+  knownUsers = [],
+  selectedUsername,
   unreadCounts,
   onSelectUser,
   onStartCall,
@@ -65,12 +70,36 @@ export const Sidebar: React.FC<SidebarProps> = ({
     );
   };
 
-  // Exclude current user from the contact list
-  const otherUsers = users.filter(u => u.id !== currentUser.id);
+  const selfLower = currentUser.username.toLowerCase();
 
-  const filteredUsers = otherUsers.filter(u =>
+  // Онлайн-собеседники (кроме себя)
+  const onlineUsers = users.filter(u => u.id !== currentUser.id);
+
+  // v1.0.11: офлайн-собеседники из «известных» — недавние контакты
+  const onlineNames = new Set(onlineUsers.map(u => u.username.toLowerCase()));
+  const offlineKnown: KnownUser[] = knownUsers
+    .filter(k => k.username.toLowerCase() !== selfLower && !onlineNames.has(k.username.toLowerCase()))
+    .filter(k => k.username.toLowerCase().includes(search.toLowerCase()))
+    .slice(0, 15);
+
+  const filteredOnline = onlineUsers.filter(u =>
     u.username.toLowerCase().includes(search.toLowerCase())
   );
+
+  // v1.0.11: клик по офлайн-контакту → псевдо-User (чат работает по имени)
+  const handleSelectKnown = (known: KnownUser) => {
+    onSelectUser({
+      id: '',
+      socketId: '',
+      username: known.username,
+      avatar: known.avatar,
+      online: false,
+      inCallWith: null,
+      lastSeen: known.lastSeen,
+    });
+  };
+
+  const hasAnyContacts = filteredOnline.length > 0 || offlineKnown.length > 0;
 
   return (
     <div className="w-80 h-full bg-gray-950/80 border-r border-gray-800/80 flex flex-col backdrop-blur-xl">
@@ -92,7 +121,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <h1 className="font-bold text-base text-white tracking-tight leading-none">
                 VoiceChat
               </h1>
-              <span className="text-[10px] text-purple-400 font-mono">v1.0.10</span>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.11</span>
             </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
@@ -163,7 +192,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Users List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {filteredUsers.length === 0 ? (
+        {!hasAnyContacts ? (
           <div className="h-48 flex flex-col items-center justify-center text-center p-4 text-gray-500">
             <Users className="w-8 h-8 mb-2 stroke-[1.5] text-gray-600" />
             <p className="text-sm font-medium">
@@ -174,75 +203,133 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </p>
           </div>
         ) : (
-          filteredUsers.map(user => {
-            const isSelected = user.id === selectedUserId;
-            const unread = unreadCounts[user.id] || 0;
-            const inCall = !!user.inCallWith;
+          <>
+            {/* ─── Онлайн ─── */}
+            {filteredOnline.map(user => {
+              const isSelected = user.username === selectedUsername;
+              // FIX v1.0.11: непрочитанные ключуются по ИМЕНИ (как в App), а не по socket.id
+              const unread = unreadCounts[user.username] || 0;
+              const inCall = !!user.inCallWith;
 
-            return (
-              <div
-                key={user.id}
-                onClick={() => onSelectUser(user)}
-                className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all ${
-                  isSelected
-                    ? 'bg-indigo-600/20 border border-indigo-500/30 text-white'
-                    : 'hover:bg-gray-900/70 border border-transparent text-gray-300'
-                }`}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <Avatar
-                    src={user.avatar}
-                    name={user.username}
-                    status={inCall ? 'busy' : 'online'}
-                    size="md"
-                  />
+              return (
+                <div
+                  key={user.id}
+                  onClick={() => onSelectUser(user)}
+                  className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all ${
+                    isSelected
+                      ? 'bg-indigo-600/20 border border-indigo-500/30 text-white'
+                      : 'hover:bg-gray-900/70 border border-transparent text-gray-300'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Avatar
+                      src={user.avatar}
+                      name={user.username}
+                      status={inCall ? 'busy' : 'online'}
+                      size="md"
+                    />
 
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-sm truncate text-white">
-                        {user.username}
-                      </span>
-                    </div>
-                    <p className="text-xs truncate">
-                      {typingUsers[user.username] ? (
-                        <span className="text-purple-400 font-medium inline-flex items-center">
-                          печатает
-                          <span className="typing-dots">
-                            <span className="typing-dot" />
-                            <span className="typing-dot" />
-                            <span className="typing-dot" />
-                          </span>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate text-white">
+                          {user.username}
                         </span>
-                      ) : inCall ? (
-                        <span className="text-amber-400">В звонке</span>
-                      ) : (
-                        <span className="text-emerald-500/90">В сети</span>
-                      )}
-                    </p>
+                      </div>
+                      <p className="text-xs truncate">
+                        {typingUsers[user.username] ? (
+                          <span className="text-purple-400 font-medium inline-flex items-center">
+                            печатает
+                            <span className="typing-dots">
+                              <span className="typing-dot" />
+                              <span className="typing-dot" />
+                              <span className="typing-dot" />
+                            </span>
+                          </span>
+                        ) : inCall ? (
+                          <span className="text-amber-400">В звонке</span>
+                        ) : (
+                          <span className="text-emerald-500/90">В сети</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {unread > 0 && (
+                      <span className="px-2 py-0.5 bg-indigo-600 text-white text-xs font-bold rounded-full animate-pop-badge">
+                        {unread}
+                      </span>
+                    )}
+
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        onStartCall(user);
+                      }}
+                      title={`Позвонить ${user.username}`}
+                      className="p-2 rounded-lg bg-gray-800/80 hover:bg-emerald-600 text-gray-300 hover:text-white transition-all transform active:scale-95"
+                    >
+                      <Phone className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
+              );
+            })}
 
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {unread > 0 && (
-                    <span className="px-2 py-0.5 bg-indigo-600 text-white text-xs font-bold rounded-full">
-                      {unread}
-                    </span>
-                  )}
-
-                  <button
-                    onClick={e => {
-                      e.stopPropagation();
-                      onStartCall(user);
-                    }}
-                    title={`Позвонить ${user.username}`}
-                    className="p-2 rounded-lg bg-gray-800/80 hover:bg-emerald-600 text-gray-300 hover:text-white transition-all transform active:scale-95"
-                  >
-                    <Phone className="w-4 h-4" />
-                  </button>
+            {/* ─── v1.0.11: Недавние (офлайн) ─── */}
+            {offlineKnown.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 px-3 pt-3 pb-1.5">
+                  <Clock className="w-3 h-3 text-gray-600" />
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-gray-600">
+                    Недавние · не в сети
+                  </span>
                 </div>
-              </div>
-            );
-          })
+                {offlineKnown.map(known => {
+                  const isSelected = known.username === selectedUsername;
+                  const unread = unreadCounts[known.username] || 0;
+
+                  return (
+                    <div
+                      key={known.username}
+                      onClick={() => handleSelectKnown(known)}
+                      title={`${known.username} сейчас офлайн — сообщение будет доставлено, когда он(а) зайдёт`}
+                      className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all ${
+                        isSelected
+                          ? 'bg-gray-800/60 border border-gray-700/60 text-white'
+                          : 'hover:bg-gray-900/50 border border-transparent text-gray-400'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0 opacity-80 hover:opacity-100 transition-opacity">
+                        <Avatar
+                          src={known.avatar}
+                          name={known.username}
+                          status="offline"
+                          size="md"
+                        />
+                        <div className="min-w-0">
+                          <span className="font-medium text-sm truncate text-gray-300 block">
+                            {known.username}
+                          </span>
+                          <p className="text-[11px] text-gray-500 truncate">
+                            {formatLastSeen(known.lastSeen)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {unread > 0 && (
+                          <span className="px-2 py-0.5 bg-gray-700 text-gray-200 text-xs font-bold rounded-full animate-pop-badge">
+                            {unread}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </>
         )}
       </div>
 

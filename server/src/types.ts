@@ -1,5 +1,13 @@
 export type MessageType = 'text' | 'image' | 'voice';
 
+// v1.0.11: метаданные сообщения, на которое отвечает текущее
+export interface ReplyMeta {
+  id: string;
+  senderName: string;
+  text?: string;
+  mediaType?: MessageType;
+}
+
 export interface User {
   id: string;
   socketId: string;
@@ -21,7 +29,16 @@ export interface ChatMessage {
   mediaType?: MessageType;
   duration?: number;
   read?: boolean;
+  replyTo?: ReplyMeta;
+  deleted?: boolean;
   timestamp: number;
+}
+
+// v1.0.11: известный пользователь (из БД), возможно офлайн
+export interface KnownUser {
+  username: string;
+  avatar?: string;
+  lastSeen: number;
 }
 
 export interface CallSignalPayload {

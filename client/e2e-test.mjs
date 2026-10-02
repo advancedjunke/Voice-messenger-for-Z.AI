@@ -1,7 +1,8 @@
 /**
- * E2E тест Voice Messenger v1.0.9
+ * E2E тест Voice Messenger v1.0.11
  * Проверяет: регистрацию, чат, историю через реконнект, пароли,
- * дубли имён, сигналинг звонков, занятость и API обновлений.
+ * дубли имён, сигналинг звонков, занятость, офлайн-сообщения, ответы,
+ * удаление сообщений, last seen и API обновлений.
  * Запуск: bun e2e-test.mjs [serverUrl]
  */
 import { io } from 'socket.io-client';
@@ -201,6 +202,65 @@ alice2.emit('chat:read', { partnerUsername: 'Bob' });
 const readAck2 = await readAck2P;
 ok('Bob получил chat:read_ack от Alice', readAck2.readerName === 'Alice');
 
+// ─── 8.7 Офлайн-сообщения (v1.0.11) ───
+console.log('8.7 Офлайн-сообщения (отправка по имени)');
+bob2.disconnect();
+await wait(300);
+const offEchoP = waitFor(alice2, 'chat:receive', 4000, m => m.text === 'офлайн-привет' && m.senderName === 'Alice');
+alice2.emit('chat:send', { recipientUsername: 'Bob', text: 'офлайн-привет', mediaType: 'text' });
+const offEcho = await offEchoP;
+ok('Эхо офлайн-отправки получено (сервер не отклонил)', Boolean(offEcho.id));
+ok('Сообщение адресовано Bob по имени (recipientName)', offEcho.recipientName === 'Bob');
+
+const bob3 = await connectAndRegister('Bob');
+ok('Bob снова в сети', !bob3.failed);
+const hist3P = waitFor(bob3, 'chat:history_loaded', 4000, h => h.recipientId === 'Alice');
+bob3.emit('chat:history', { recipientUsername: 'Alice' });
+const hist3 = await hist3P;
+ok(`Bob видит сообщение, отправленное офлайн (${hist3.messages.length} сообщ.)`, hist3.messages.some(m => m.text === 'офлайн-привет'));
+
+// ─── 8.8 Ответы на сообщения (v1.0.11) ───
+console.log('8.8 Ответы на сообщения (reply)');
+const replyRecvP = waitFor(bob3, 'chat:receive', 4000, m => m.text === 'Отвечаю!');
+alice2.emit('chat:send', {
+  recipientUsername: 'Bob',
+  text: 'Отвечаю!',
+  mediaType: 'text',
+  replyTo: { id: offEcho.id, senderName: 'Alice', text: 'офлайн-привет', mediaType: 'text' },
+});
+const replyMsg = await replyRecvP;
+ok('Bob получил сообщение с replyTo (сниппет сохранён)', replyMsg.replyTo?.text === 'офлайн-привет' && replyMsg.replyTo?.senderName === 'Alice');
+
+// ─── 8.9 Удаление сообщений (v1.0.11) ───
+console.log('8.9 Удаление сообщений');
+// Bob пытается удалить ЧУЖОЕ сообщение → отказ
+const delFailP = waitFor(bob3, 'chat:delete_failed', 4000);
+bob3.emit('chat:delete', { partnerUsername: 'Alice', messageId: replyMsg.id });
+const delFail = await delFailP;
+ok('Чужое сообщение удалить нельзя (chat:delete_failed)', Boolean(delFail.message));
+
+// Alice удаляет СВОЁ сообщение → обе стороны уведомлены
+const delAckP = waitFor(alice2, 'chat:message_deleted', 4000, d => d.messageId === replyMsg.id);
+const delRecvP = waitFor(bob3, 'chat:message_deleted', 4000, d => d.messageId === replyMsg.id);
+alice2.emit('chat:delete', { partnerUsername: 'Bob', messageId: replyMsg.id });
+await Promise.all([delAckP, delRecvP]);
+ok('Обе стороны уведомлены о удалении', true);
+
+const hist4P = waitFor(bob3, 'chat:history_loaded', 4000, h => h.recipientId === 'Alice');
+bob3.emit('chat:history', { recipientUsername: 'Alice' });
+const hist4 = await hist4P;
+const deletedMsg = hist4.messages.find(m => m.id === replyMsg.id);
+ok('В истории сообщение помечено deleted, контент стёрт', Boolean(deletedMsg?.deleted) && !deletedMsg?.text);
+
+// ─── 8.10 Известные пользователи / last seen (v1.0.11) ───
+console.log('8.10 Известные пользователи (last seen)');
+const knownP = waitFor(alice2, 'users:known_list', 4000);
+alice2.emit('users:known');
+const known = await knownP;
+const knownBob = (known.users || []).find(u => u.username.toLowerCase() === 'bob');
+ok(`users:known_list содержит пользователей (${(known.users || []).length})`, (known.users || []).length >= 1);
+ok('В списке есть Bob с lastSeen', Boolean(knownBob) && knownBob.lastSeen > 0);
+
 // ─── 9. Оффлайн-цель: call:initiate на несуществующего ───
 console.log('9. Вызов несуществующего пользователя');
 const failP = waitFor(alice2, 'call:failed', 4000);
@@ -226,6 +286,12 @@ ok('GET /api/updates/check видит релиз 9.9.9-test', check.available &&
 const dl = await fetch(`${SERVER}/api/updates/download/9.9.9-test`);
 const dlBuf = await dl.text();
 ok('GET /api/updates/download отдаёт payload', dlBuf === 'fake-asar-payload-for-testing', `получено: ${dlBuf.slice(0, 40)}`);
+
+// v1.0.11: удаление релиза (очистка за собой, чтобы клиенты не видели фантомный бейдж)
+const delRel = await fetch(`${SERVER}/api/updates/publish/9.9.9-test`, { method: 'DELETE' }).then(r => r.json());
+ok('DELETE /api/updates/publish/:version — ok', delRel.success === true, JSON.stringify(delRel));
+const checkAfter = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
+ok('После удаления релиза check → available:false', checkAfter.available === false, JSON.stringify(checkAfter));
 
 // ─── Итог ───
 console.log('\n' + '═'.repeat(50));

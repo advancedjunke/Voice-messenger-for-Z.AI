@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
-import type { User, ChatMessage, MessageType } from './types.js';
+import type { User, ChatMessage, MessageType, KnownUser } from './types.js';
 import { useWebRTC } from './hooks/useWebRTC.js';
 import { audioTone } from './utils/audioTone.js';
+import { isNewerVersion } from './utils/format.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
 import { LoginModal } from './components/LoginModal.js';
@@ -37,7 +38,7 @@ function getEffectiveServerUrl(): string {
 }
 
 export function App() {
-  const APP_VERSION = '1.0.10'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.11'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');
@@ -59,6 +60,8 @@ export function App() {
   // v1.0.10: индикаторы «печатает…» (username → таймстамп последнего события)
   const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
   const typingTimeoutsRef = useRef<Record<string, number>>({});
+  // v1.0.11: известные пользователи (в т.ч. офлайн) — для сайдбара
+  const [knownUsers, setKnownUsers] = useState<KnownUser[]>([]);
   // v1.0.10: звук уведомлений (сохраняется в localStorage)
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => localStorage.getItem('vm_sound') !== '0');
   const soundEnabledRef = useRef(soundEnabled);
@@ -92,12 +95,12 @@ export function App() {
     }
   }, []);
 
-  // Check for updates on mount
+  // Check for updates on mount (v1.0.11: бейдж только если версия ДЕЙСТВИТЕЛЬНО новее)
   useEffect(() => {
     fetch(`${serverUrl}/api/updates/check`)
       .then(res => res.json())
       .then(data => {
-        if (data && data.available && data.latestVersion && data.latestVersion !== APP_VERSION) {
+        if (data && data.available && data.latestVersion && isNewerVersion(data.latestVersion, APP_VERSION)) {
           setUpdateInfo(data);
         }
       })
@@ -137,6 +140,8 @@ export function App() {
         localStorage.setItem('vm_avatar', user.avatar);
       }
       setUsers(allUsers);
+      // v1.0.11: запрашиваем известных (в т.ч. офлайн) пользователей
+      socket.emit('users:known');
     });
 
     // Регистрация не прошла (имя занято/пароль неверный)
@@ -151,6 +156,11 @@ export function App() {
       localStorage.removeItem('vm_username');
       setCurrentUser(null);
       setSelectedUser(null);
+      // v1.0.11: сервер принудительно закрыл сокет — пересоздаём соединение,
+      // чтобы следующий вход в сеть гарантированно дошёл до сервера
+      // (найдено при QA: после replace старый сокет «зависал» и emit терялся)
+      socket.disconnect();
+      socket.connect();
     });
 
     socket.on('user:updated', (updatedUser: User) => {
@@ -234,6 +244,32 @@ export function App() {
           });
         }, 3000);
       }
+    });
+
+    // v1.0.11: известные пользователи (в т.ч. офлайн) из БД сервера
+    socket.on('users:known_list', ({ users: known }: { users: KnownUser[] }) => {
+      setKnownUsers(Array.isArray(known) ? known : []);
+    });
+
+    // v1.0.11: собеседник (или мы) удалил сообщение → помечаем удалённым
+    socket.on('chat:message_deleted', ({ messageId, partnerUsername }: { messageId: string; partnerUsername: string }) => {
+      if (!partnerUsername) return;
+      setConversations(prev => {
+        const conv = prev[partnerUsername];
+        if (!conv || !conv.some(m => m.id === messageId)) return prev;
+        return {
+          ...prev,
+          [partnerUsername]: conv.map(m =>
+            m.id === messageId
+              ? { ...m, deleted: true, text: undefined, mediaUrl: undefined, duration: undefined, replyTo: undefined }
+              : m
+          ),
+        };
+      });
+    });
+
+    socket.on('chat:delete_failed', ({ message }: { message?: string }) => {
+      console.warn('[chat:delete_failed]', message || 'Не удалось удалить сообщение');
     });
 
     socket.on(
@@ -343,17 +379,28 @@ export function App() {
     }
   };
 
-  // Send message
+  // Send message (v1.0.11: recipientUsername — можно писать и офлайн-собеседнику)
   const handleSendMessage = (payload: {
     text?: string;
     mediaUrl?: string;
     mediaType?: MessageType;
     duration?: number;
+    replyTo?: { id: string; senderName: string; text?: string; mediaType?: MessageType };
   }) => {
     if (!selectedUser || !socketRef.current) return;
     socketRef.current.emit('chat:send', {
       recipientId: selectedUser.id,
+      recipientUsername: selectedUser.username,
       ...payload,
+    });
+  };
+
+  // v1.0.11: удалить своё сообщение
+  const handleDeleteMessage = (messageId: string) => {
+    if (!selectedUser || !socketRef.current) return;
+    socketRef.current.emit('chat:delete', {
+      partnerUsername: selectedUser.username,
+      messageId,
     });
   };
 
@@ -382,7 +429,8 @@ export function App() {
           <Sidebar
             currentUser={currentUser}
             users={users}
-            selectedUserId={selectedUser?.id || null}
+            knownUsers={knownUsers}
+            selectedUsername={selectedUser?.username || null}
             unreadCounts={unreadCounts}
             onSelectUser={handleSelectUser}
             onStartCall={handleStartCall}
@@ -403,6 +451,7 @@ export function App() {
             activeCall={activeCall}
             onSendMessage={handleSendMessage}
             onStartCall={handleStartCall}
+            onDeleteMessage={handleDeleteMessage}
             isPartnerTyping={selectedUser ? Boolean(typingUsers[selectedUser.username]) : false}
             onTyping={(recipientId, isTyping) => socketRef.current?.emit('chat:typing', { recipientId, isTyping })}
           />
