@@ -1,6 +1,6 @@
 {
   "name": "voice-messenger",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Voice Messenger with P2P WebRTC Calls and Chat",
   "main": "electron/main.cjs",
   "private": true,
@@ -10,8 +10,8 @@
     "start": "npm --prefix server start",
     "dev": "node start-dev.js",
     "electron:dev": "electron electron/main.cjs",
-    "electron:pack": "npm --prefix server install --no-audit --no-fund && npm run build && electron-builder --win --dir",
-    "electron:dist": "npm --prefix server install --no-audit --no-fund && npm run build && electron-builder --win nsis",
+    "electron:pack": "npm --prefix server install --no-audit --no-fund && npm run build && npm --prefix server prune --omit=dev && electron-builder --win --dir",
+    "electron:dist": "npm --prefix server install --no-audit --no-fund && npm run build && npm --prefix server prune --omit=dev && electron-builder --win nsis portable --publish never",
     "publish-update": "node publish-release.cjs"
   },
   "build": {
@@ -23,6 +23,15 @@
         "nsis",
         "portable"
       ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": true,
+      "include": "build/installer.nsh",
+      "artifactName": "VoiceMessenger-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "VoiceMessenger-Portable-${version}.${ext}"
     },
     "directories": {
       "output": "release"

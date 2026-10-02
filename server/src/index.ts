@@ -658,7 +658,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 server.listen(Number(PORT), '0.0.0.0', () => {
   const lanUrls = getLanAddresses();
-  console.log(`🚀 Voice Messenger Server v1.0.15 запущен`);
+  console.log(`🚀 Voice Messenger Server v1.0.16 запущен`);
   console.log(`   Локально:       http://localhost:${PORT}`);
   if (lanUrls.length > 0) {
     console.log(`   Для друзей (LAN):`);

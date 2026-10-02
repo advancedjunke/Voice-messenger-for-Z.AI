@@ -74,7 +74,7 @@ function showDesktopNotification(senderName: string, message: ChatMessage) {
 }
 
 export function App() {
-  const APP_VERSION = '1.0.15'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.16'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');

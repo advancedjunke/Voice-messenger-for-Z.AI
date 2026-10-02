@@ -1,0 +1,55 @@
+name: Build Windows App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install root dependencies (Electron + builder)
+        run: npm install --no-audit --no-fund
+
+      - name: Install client dependencies
+        run: npm --prefix client install --no-audit --no-fund
+
+      - name: Install server dependencies
+        run: npm --prefix server install --no-audit --no-fund
+
+      - name: Build client and server
+        run: npm run build
+
+      - name: Remove server dev dependencies before packaging
+        run: npm --prefix server prune --omit=dev
+
+      - name: Build Windows executables (installer + portable)
+        run: npx electron-builder --win nsis portable --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts (kept 30 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceMessenger-Windows-x64
+          path: release/*.exe
+          if-no-files-found: error
+
+      - name: Attach executables to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.exe
