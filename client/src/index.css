@@ -192,6 +192,37 @@ body {
   animation: fadeInSoft 0.35s ease-out forwards;
 }
 
+/* ─── v1.0.13: появление модалки настроек сервера ─── */
+@keyframes scaleIn {
+  from {
+    transform: scale(0.94) translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-scale-in {
+  animation: scaleIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ─── v1.0.13: аккуратный скроллбар для модалок ─── */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.4);
+  border-radius: 999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.7);
+}
+
 /* ─── v1.0.11: подсветка совпадения поиска ─── */
 .search-hit {
   background: rgba(250, 204, 21, 0.22);

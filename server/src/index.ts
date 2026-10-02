@@ -3,6 +3,7 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
@@ -82,6 +83,31 @@ function broadcastUsersList() {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', onlineCount: usersBySocketId.size });
+});
+
+// v1.0.13: LAN-хостинг — клиент (и владелец ПК) видит, какие адреса раздать друзьям.
+// Друг открывает http://<LAN-IP>:<PORT> прямо в браузере — сервер раздаёт собранный клиент.
+function getLanAddresses(): string[] {
+  const urls: string[] = [];
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      // Пропускаем internal (loopback) и IPv6 — друзьям нужен IPv4 локальной сети
+      if (net.internal || net.family !== 'IPv4') continue;
+      urls.push(`http://${net.address}:${PORT}`);
+    }
+  }
+  return urls;
+}
+
+app.get('/api/server-info', (_req, res) => {
+  res.json({
+    status: 'ok',
+    port: Number(PORT) || 3001,
+    hostname: os.hostname(),
+    lanUrls: getLanAddresses(),
+    onlineCount: usersBySocketId.size,
+  });
 });
 
 // Auto-updater endpoints
@@ -614,6 +640,19 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(clientDistPath, 'index.html'));
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Voice Messenger Server running on http://localhost:${PORT}`);
+// v1.0.13: ЯВНЫЙ биндинг на все интерфейсы (0.0.0.0) — раньше listen(PORT) без хоста
+// на некоторых системах Windows/фаервол ловил неоднозначность, и друг не мог подключиться.
+server.listen(Number(PORT), '0.0.0.0', () => {
+  const lanUrls = getLanAddresses();
+  console.log(`🚀 Voice Messenger Server v1.0.13 запущен`);
+  console.log(`   Локально:       http://localhost:${PORT}`);
+  if (lanUrls.length > 0) {
+    console.log(`   Для друзей (LAN):`);
+    for (const u of lanUrls) console.log(`     → ${u}`);
+    console.log(`   Если друг не подключается:`);
+    console.log(`     1) Разрешите порт ${PORT} в брандмауэре Windows (см. README)`);
+    console.log(`     2) Оба устройства должны быть в одной Wi-Fi/проводной сети`);
+  } else {
+    console.log(`   LAN-адреса не найдены — проверьте сетевые подключения`);
+  }
 });

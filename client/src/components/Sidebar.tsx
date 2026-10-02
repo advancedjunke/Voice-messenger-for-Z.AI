@@ -3,6 +3,7 @@ import type { User, KnownUser } from '../types.js';
 import { Phone, Search, Users, LogOut, Settings, Bell, BellOff, Clock } from 'lucide-react';
 import { Avatar } from './Avatar.js';
 import { formatLastSeen } from '../utils/format.js';
+import { ServerSettingsModal } from './ServerSettingsModal.js';
 
 interface SidebarProps {
   currentUser: User;
@@ -46,21 +47,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleSound,
 }) => {
   const [search, setSearch] = useState('');
+  // v1.0.13: модалка настроек сервера вместо голого prompt()
+  const [isServerModalOpen, setIsServerModalOpen] = useState(false);
 
   // FIX: бейджи статуса встроены в сайдбар вместо fixed-оверлея,
   // который перекрывал кнопку «Позвонить»
-  const handleChangeServer = () => {
-    const current = localStorage.getItem('vm_server_url') || serverUrl;
-    const next = prompt('Адрес сервера мессенджера (например, IP друга или облачный хостинг):', current);
-    if (next !== null) {
-      if (next.trim()) {
-        localStorage.setItem('vm_server_url', next.trim());
-      } else {
-        localStorage.removeItem('vm_server_url');
-      }
-      window.location.reload();
-    }
-  };
 
   const handleShowUpdate = () => {
     alert(
@@ -121,7 +112,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <h1 className="font-bold text-base text-white tracking-tight leading-none">
                 VoiceChat
               </h1>
-              <span className="text-[10px] text-purple-400 font-mono">v1.0.12</span>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.13</span>
             </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
@@ -146,8 +137,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="flex items-center gap-2 mt-2 flex-wrap">
           <button
             type="button"
-            onClick={handleChangeServer}
-            title="Кликните, чтобы изменить адрес сервера"
+            onClick={() => setIsServerModalOpen(true)}
+            title="Кликните, чтобы настроить адрес сервера (например, IP друга по локальной сети)"
             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium cursor-pointer hover:scale-105 active:scale-95 transition-all ${
               socketConnected
                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'
@@ -332,6 +323,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </>
         )}
       </div>
+
+      {/* v1.0.13: модалка настроек сервера (LAN-ссылки для друга, смена адреса) */}
+      <ServerSettingsModal
+        isOpen={isServerModalOpen}
+        currentServerUrl={serverUrl}
+        socketConnected={socketConnected}
+        onClose={() => setIsServerModalOpen(false)}
+      />
 
       {/* Current User Card */}
       <div
