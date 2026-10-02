@@ -15,11 +15,18 @@ import { ForwardModal } from './components/ForwardModal.js';
 const CLOUD_SERVER_URL = 'https://f2f9c29f9c574a2c-217-199-233-97.serveousercontent.com';
 
 function getEffectiveServerUrl(): string {
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = params.get('server');
+
+  // v1.0.14: в настольном приложении (Electron, file://) адрес приходит от
+  // умной цепочки запуска (localhost → UDP-поиск → встроенный хост). Он ВСЕГДА
+  // актуальнее сохранённого в localStorage — иначе после смены хоста приложение
+  // навсегда цеплялось бы за старый мёртвый IP.
+  if (fromQuery && window.location.protocol === 'file:') return fromQuery;
+
   const saved = localStorage.getItem('vm_server_url');
   if (saved) return saved;
 
-  const params = new URLSearchParams(window.location.search);
-  const fromQuery = params.get('server');
   if (fromQuery) return fromQuery;
 
   if (import.meta.env.VITE_SERVER_URL) return import.meta.env.VITE_SERVER_URL;
@@ -67,7 +74,7 @@ function showDesktopNotification(senderName: string, message: ChatMessage) {
 }
 
 export function App() {
-  const APP_VERSION = '1.0.13'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.14'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');

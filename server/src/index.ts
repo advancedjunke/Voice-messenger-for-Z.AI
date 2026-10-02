@@ -9,6 +9,7 @@ import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import { User, ChatMessage, ReplyMeta, KnownUser } from './types.js';
 import { initDatabase, dbSaveUser, dbGetUser, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers } from './db.js';
+import { startDiscoveryResponder } from './discovery.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -640,19 +641,36 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(clientDistPath, 'index.html'));
 });
 
-// v1.0.13: ЯВНЫЙ биндинг на все интерфейсы (0.0.0.0) — раньше listen(PORT) без хоста
+// v1.0.14: ЯВНЫЙ биндинг на все интерфейсы (0.0.0.0) — раньше listen(PORT) без хоста
 // на некоторых системах Windows/фаервол ловил неоднозначность, и друг не мог подключиться.
+// Защита от падения: в встроенном режиме (Electron) ошибка порта не должна валить всё приложение.
+server.on('error', (err: NodeJS.ErrnoException) => {
+  console.error(`❌ [Server Error] ${err.code || ''} ${err.message}`);
+  if (err.code === 'EADDRINUSE') {
+    console.error('   Порт уже занят — возможно, сервер уже запущен на этом ПК (в другом окне/приложении).');
+  }
+  if (!process.env.VM_EMBEDDED) {
+    process.exit(1); // standalone (батник/консоль) — честно показываем ошибку и закрываемся
+  }
+  // VM_EMBEDDED=1 (встроен в Electron) — не завершаем процесс, main-процесс сам
+  // проверит /health и перейдёт к следующему варианту цепочки.
+});
+
 server.listen(Number(PORT), '0.0.0.0', () => {
   const lanUrls = getLanAddresses();
-  console.log(`🚀 Voice Messenger Server v1.0.13 запущен`);
+  console.log(`🚀 Voice Messenger Server v1.0.14 запущен`);
   console.log(`   Локально:       http://localhost:${PORT}`);
   if (lanUrls.length > 0) {
     console.log(`   Для друзей (LAN):`);
     for (const u of lanUrls) console.log(`     → ${u}`);
     console.log(`   Если друг не подключается:`);
-    console.log(`     1) Разрешите порт ${PORT} в брандмауэре Windows (см. README)`);
+    console.log(`     1) Разрешите порты ${PORT} (TCP+UDP) и 3002 (UDP) в брандмауэре Windows (см. README)`);
     console.log(`     2) Оба устройства должны быть в одной Wi-Fi/проводной сети`);
   } else {
     console.log(`   LAN-адреса не найдены — проверьте сетевые подключения`);
   }
+
+  // v1.0.14: UDP-ответчик — приложение друзей найдёт этот сервер в локальной
+  // сети автоматически (без ручного ввода IP) через broadcast на порт 3002.
+  startDiscoveryResponder(Number(PORT) || 3001);
 });

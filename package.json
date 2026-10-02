@@ -1,6 +1,6 @@
 {
   "name": "voice-messenger",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "Voice Messenger with P2P WebRTC Calls and Chat",
   "main": "electron/main.cjs",
   "private": true,
@@ -10,8 +10,8 @@
     "start": "npm --prefix server start",
     "dev": "node start-dev.js",
     "electron:dev": "electron electron/main.cjs",
-    "electron:pack": "npm run build && electron-builder --win --dir",
-    "electron:dist": "npm run build && electron-builder --win nsis",
+    "electron:pack": "npm --prefix server install --no-audit --no-fund && npm run build && electron-builder --win --dir",
+    "electron:dist": "npm --prefix server install --no-audit --no-fund && npm run build && electron-builder --win nsis",
     "publish-update": "node publish-release.cjs"
   },
   "build": {
@@ -27,11 +27,23 @@
     "directories": {
       "output": "release"
     },
+    "asar": false,
     "files": [
       "electron/**/*",
       "server/dist/**/*",
       "server/package.json",
+      "server/node_modules/**/*",
       "client/dist/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "start-server.bat",
+        "to": "start-server.bat"
+      },
+      {
+        "from": "README.md",
+        "to": "README-LAN.md"
+      }
     ]
   },
   "devDependencies": {

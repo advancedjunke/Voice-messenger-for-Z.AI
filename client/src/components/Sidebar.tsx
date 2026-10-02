@@ -112,7 +112,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <h1 className="font-bold text-base text-white tracking-tight leading-none">
                 VoiceChat
               </h1>
-              <span className="text-[10px] text-purple-400 font-mono">v1.0.13</span>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.14</span>
             </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
