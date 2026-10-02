@@ -1,13 +1,41 @@
 {
-  "name": "voice-messenger-root",
-  "version": "1.0.0",
+  "name": "voice-messenger",
+  "version": "1.0.8",
+  "description": "Voice Messenger with P2P WebRTC Calls and Chat",
+  "main": "electron/main.cjs",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "npm --prefix client run build && npm --prefix server run build",
     "start": "npm --prefix server start",
     "dev": "node start-dev.js",
-    "dev:server": "npm --prefix server run dev",
-    "dev:client": "npm --prefix client run dev"
+    "electron:dev": "electron electron/main.cjs",
+    "electron:pack": "npm run build && electron-builder --win --dir",
+    "electron:dist": "npm run build && electron-builder --win nsis",
+    "publish-update": "node publish-release.cjs"
+  },
+  "build": {
+    "appId": "com.voicemessenger.app",
+    "productName": "VoiceMessenger",
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "server/dist/**/*",
+      "server/package.json",
+      "client/dist/**/*"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
   }
 }

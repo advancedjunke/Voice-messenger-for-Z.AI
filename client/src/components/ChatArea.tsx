@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { User, ChatMessage, ActiveCall, MessageType } from '../types.js';
-import { Send, Phone, MessageSquare, Shield, PhoneCall, Image as ImageIcon, Mic, X } from 'lucide-react';
+import { Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X } from 'lucide-react';
 import { AudioMessagePlayer } from './AudioMessagePlayer.js';
 import { VoiceRecorder } from './VoiceRecorder.js';
+import { Avatar } from './Avatar.js';
 import { compressImage } from '../utils/imageCompressor.js';
 
 interface ChatAreaProps {
@@ -89,6 +90,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     setIsRecordingVoice(false);
   };
 
+  const handleSendWaveGreeting = () => {
+    if (!recipient) return;
+    onSendMessage({
+      text: `👋 ${currentUser.username} машет ручкой!`,
+      mediaUrl: '/wave.webp',
+      mediaType: 'image',
+    });
+  };
+
   const formatTime = (ts: number) => {
     const date = new Date(ts);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -119,7 +129,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     activeCall && activeCall.partnerId === recipient.id;
 
   return (
-    <div className="flex-1 h-full flex flex-col bg-gray-950/30 relative">
+    <div
+      key={recipient.id}
+      className="flex-1 h-full flex flex-col bg-gray-950/30 relative animate-chat-switch overflow-hidden"
+    >
       {/* Lightbox for viewing full-size images */}
       {selectedLightboxImage && (
         <div
@@ -143,16 +156,12 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Top Header */}
       <div className="px-6 py-4 border-b border-gray-800/80 bg-gray-950/60 backdrop-blur-md flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center font-bold text-white shadow">
-              {recipient.username.charAt(0).toUpperCase()}
-            </div>
-            <span
-              className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-950 ${
-                recipient.inCallWith ? 'bg-amber-500' : 'bg-emerald-500'
-              }`}
-            />
-          </div>
+          <Avatar
+            src={recipient.avatar}
+            name={recipient.username}
+            status={recipient.inCallWith ? 'busy' : 'online'}
+            size="md"
+          />
           <div>
             <h3 className="font-bold text-base text-white">
               {recipient.username}
@@ -189,63 +198,118 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Messages Stream */}
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center text-gray-500">
-            <div className="w-12 h-12 rounded-2xl bg-gray-900/60 border border-gray-800 flex items-center justify-center mb-3">
-              <PhoneCall className="w-6 h-6 text-gray-600" />
+          <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-sm mx-auto my-auto animate-in fade-in duration-300">
+            <div className="relative mb-3">
+              <Avatar
+                src={recipient.avatar}
+                name={recipient.username}
+                size="2xl"
+                className="shadow-2xl ring-4 ring-purple-500/20"
+              />
             </div>
-            <p className="text-sm font-medium">История сообщений пуста</p>
-            <p className="text-xs text-gray-600 mt-1">
-              Напишите сообщение, прикрепите фото или запишите голосовое!
+            <h3 className="text-xl font-bold text-white mb-1.5">
+              {recipient.username}
+            </h3>
+            <p className="text-xs text-gray-400 mb-6 leading-relaxed">
+              Это начало вашей личной истории переписки с <span className="text-purple-300 font-semibold">{recipient.username}</span>.
+              Начните общение или помашите ручкой, чтобы поздороваться!
             </p>
+
+            {/* Discord-style wave button */}
+            <button
+              type="button"
+              onClick={handleSendWaveGreeting}
+              className="inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-500 hover:to-indigo-500 text-white font-semibold rounded-2xl shadow-xl shadow-purple-600/25 transition-all transform hover:scale-105 active:scale-95 group border border-purple-400/30 cursor-pointer"
+            >
+              <img
+                src="/wave.webp"
+                alt="Wave"
+                className="w-7 h-7 object-contain group-hover:rotate-12 transition-transform drop-shadow"
+              />
+              <span>Помашите ручкой 👋</span>
+            </button>
           </div>
         ) : (
           messages.map(msg => {
             const isMe = msg.senderId === currentUser.id;
+            const isWave = msg.mediaUrl === '/wave.webp';
 
             return (
               <div
                 key={msg.id}
-                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
               >
-                <div className="flex items-baseline gap-2 mb-1 px-1">
-                  <span className="text-xs font-semibold text-gray-400">
-                    {isMe ? 'Вы' : msg.senderName}
-                  </span>
-                  <span className="text-[11px] text-gray-500">
-                    {formatTime(msg.timestamp)}
-                  </span>
-                </div>
+                {/* Sender Avatar */}
+                <Avatar
+                  src={isMe ? currentUser.avatar : (msg.senderAvatar || recipient.avatar)}
+                  name={isMe ? currentUser.username : msg.senderName}
+                  size="sm"
+                  className="mb-1 shrink-0"
+                />
 
-                <div
-                  className={`max-w-[75%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words ${
-                    isMe
-                      ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-tr-none'
-                      : 'bg-gray-900 border border-gray-800 text-gray-200 rounded-tl-none'
-                  }`}
-                >
-                  {/* Image Attachment */}
-                  {msg.mediaType === 'image' && msg.mediaUrl && (
-                    <div className="mb-2">
-                      <img
-                        src={msg.mediaUrl}
-                        alt="Photo"
-                        onClick={() => setSelectedLightboxImage(msg.mediaUrl || null)}
-                        className="rounded-xl max-h-72 w-auto object-cover cursor-pointer hover:opacity-95 transition-opacity border border-black/20"
-                      />
+                <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
+                  <div className="flex items-baseline gap-2 mb-1 px-1">
+                    <span className="text-xs font-semibold text-gray-400">
+                      {isMe ? 'Вы' : msg.senderName}
+                    </span>
+                    <span className="text-[11px] text-gray-500">
+                      {formatTime(msg.timestamp)}
+                    </span>
+                  </div>
+
+                  {isWave ? (
+                    /* Discord-style wave greeting card */
+                    <div
+                      className={`p-3 rounded-2xl shadow-lg border transition-all ${
+                        isMe
+                          ? 'bg-purple-950/40 border-purple-500/40 text-purple-100 rounded-tr-none'
+                          : 'bg-gray-900/90 border-gray-800 text-gray-100 rounded-tl-none'
+                      }`}
+                    >
+                      <div className="flex flex-col items-center gap-2">
+                        <img
+                          src="/wave.webp"
+                          alt="Wave greeting"
+                          className="w-28 h-auto object-contain rounded-xl hover:scale-105 transition-transform drop-shadow"
+                        />
+                        <span className="text-xs font-semibold tracking-wide text-center px-2 py-0.5 bg-black/40 rounded-lg text-purple-200">
+                          {msg.text || `👋 ${msg.senderName} машет ручкой!`}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words ${
+                        isMe
+                          ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-tr-none'
+                          : 'bg-gray-900 border border-gray-800 text-gray-200 rounded-tl-none'
+                      }`}
+                    >
+                      {/* Image Attachment */}
+                      {msg.mediaType === 'image' && msg.mediaUrl && (
+                        <div className="mb-2">
+                          <img
+                            src={msg.mediaUrl}
+                            alt="Photo"
+                            onClick={() => setSelectedLightboxImage(msg.mediaUrl || null)}
+                            className="rounded-xl max-h-72 w-auto object-cover cursor-pointer hover:opacity-95 transition-opacity border border-black/20"
+                          />
+                        </div>
+                      )}
+
+                      {/* Voice Note */}
+                      {msg.mediaType === 'voice' && msg.mediaUrl && (
+                        <AudioMessagePlayer
+                          src={msg.mediaUrl}
+                          duration={msg.duration}
+                          isMe={isMe}
+                        />
+                      )}
+
+                      {/* Text content if present */}
+                      {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                     </div>
                   )}
-
-                  {/* Voice Note */}
-                  {msg.mediaType === 'voice' && msg.mediaUrl && (
-                    <AudioMessagePlayer
-                      src={msg.mediaUrl}
-                      duration={msg.duration}
-                      isMe={isMe}
-                    />
-                  )}
-
-                  {/* Text content if present */}
-                  {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                 </div>
               </div>
             );
@@ -312,6 +376,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               className="p-3 text-gray-400 hover:text-indigo-400 hover:bg-gray-900 rounded-xl transition-colors"
             >
               <Mic className="w-5 h-5" />
+            </button>
+
+            {/* Quick Wave Greeting Button */}
+            <button
+              type="button"
+              onClick={handleSendWaveGreeting}
+              title="Помахать ручкой 👋 (стикер приветствия Discord)"
+              className="p-2 text-gray-400 hover:text-purple-300 hover:bg-gray-900 rounded-xl transition-all hover:scale-110 active:scale-95 shrink-0 flex items-center justify-center"
+            >
+              <img
+                src="/wave.webp"
+                alt="Wave"
+                className="w-6 h-6 object-contain drop-shadow"
+              />
             </button>
 
             {/* Text input */}

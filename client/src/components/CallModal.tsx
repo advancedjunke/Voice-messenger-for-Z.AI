@@ -1,14 +1,16 @@
 import React from 'react';
 import { Phone, PhoneOff, Mic, MicOff, Volume2 } from 'lucide-react';
 import type { ActiveCall } from '../types.js';
+import { Avatar } from './Avatar.js';
 
 interface CallModalProps {
   activeCall: ActiveCall | null;
-  incomingCall: { callerId: string; callerName: string } | null;
+  incomingCall: { callerId: string; callerName: string; callerAvatar?: string } | null;
   isMuted: boolean;
   duration: number;
   localVolume: number;
   remoteVolume: number;
+  audioMode?: 'webrtc' | 'relay';
   onAnswer: () => void;
   onReject: () => void;
   onEnd: () => void;
@@ -22,6 +24,7 @@ export const CallModal: React.FC<CallModalProps> = ({
   duration,
   localVolume,
   remoteVolume,
+  audioMode,
   onAnswer,
   onReject,
   onEnd,
@@ -44,8 +47,13 @@ export const CallModal: React.FC<CallModalProps> = ({
             {/* Animated ringing pulse rings */}
             <span className="absolute inset-0 rounded-full bg-indigo-500/30 animate-ping" />
             <span className="absolute inset-2 rounded-full bg-purple-500/40 animate-pulse" />
-            <div className="relative w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-3xl font-bold text-white shadow-xl">
-              {incomingCall.callerName.charAt(0).toUpperCase()}
+            <div className="relative">
+              <Avatar
+                src={incomingCall.callerAvatar}
+                name={incomingCall.callerName}
+                size="2xl"
+                className="shadow-xl"
+              />
             </div>
           </div>
 
@@ -89,14 +97,12 @@ export const CallModal: React.FC<CallModalProps> = ({
     <div className="fixed bottom-6 right-6 z-40 w-80 bg-gray-900/95 backdrop-blur-xl border border-gray-700/80 rounded-2xl shadow-2xl p-4 text-white transition-all transform animate-in slide-in-from-bottom-5">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="w-11 h-11 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center font-bold text-base shadow-md">
-              {activeCall.partnerName.charAt(0).toUpperCase()}
-            </div>
-            {activeCall.status === 'connected' && (
-              <span className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-gray-900 rounded-full" />
-            )}
-          </div>
+          <Avatar
+            src={activeCall.partnerAvatar}
+            name={activeCall.partnerName}
+            size="lg"
+            status={activeCall.status === 'connected' ? 'busy' : 'online'}
+          />
           <div>
             <h4 className="font-semibold text-sm leading-tight text-white">
               {activeCall.partnerName}
@@ -144,6 +150,20 @@ export const CallModal: React.FC<CallModalProps> = ({
               style={{ width: isMuted ? '0%' : `${localVolume}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {/* Audio mode indicator */}
+      {activeCall.status === 'connected' && audioMode && (
+        <div className="mb-2 flex items-center justify-center">
+          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
+            audioMode === 'webrtc'
+              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+              : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${audioMode === 'webrtc' ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            {audioMode === 'webrtc' ? 'P2P' : 'Relay'}
+          </span>
         </div>
       )}
 

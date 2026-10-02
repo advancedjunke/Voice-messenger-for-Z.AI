@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import type { User } from '../types.js';
-import { Phone, Search, Users, LogOut, Radio } from 'lucide-react';
+import { Phone, Search, Users, LogOut, Settings } from 'lucide-react';
+import { Avatar } from './Avatar.js';
 
 interface SidebarProps {
   currentUser: User;
@@ -10,6 +11,7 @@ interface SidebarProps {
   onSelectUser: (user: User) => void;
   onStartCall: (user: User) => void;
   onLogout: () => void;
+  onOpenProfile?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -20,6 +22,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectUser,
   onStartCall,
   onLogout,
+  onOpenProfile,
 }) => {
   const [search, setSearch] = useState('');
 
@@ -36,12 +39,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="p-4 border-b border-gray-800/80">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center shadow-md">
-              <Radio className="w-4 h-4 text-white" />
+            <div className="w-9 h-9 rounded-xl bg-slate-900 border border-purple-500/30 overflow-hidden flex items-center justify-center shadow-lg shadow-purple-500/10 shrink-0">
+              <img
+                src="/icon.png"
+                alt="VoiceChat Logo"
+                className="w-full h-full object-cover"
+                onError={e => {
+                  (e.target as HTMLElement).style.display = 'none';
+                }}
+              />
             </div>
-            <h1 className="font-bold text-lg text-white tracking-tight">
-              VoiceChat
-            </h1>
+            <div>
+              <h1 className="font-bold text-base text-white tracking-tight leading-none">
+                VoiceChat
+              </h1>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.8</span>
+            </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -91,18 +104,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 }`}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="relative flex-shrink-0">
-                    <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-gray-700 to-gray-800 flex items-center justify-center font-semibold text-sm text-white shadow">
-                      {user.username.charAt(0).toUpperCase()}
-                    </div>
-                    {/* Status Dot */}
-                    <span
-                      className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-950 ${
-                        inCall ? 'bg-amber-500' : 'bg-emerald-500'
-                      }`}
-                      title={inCall ? 'В звонке' : 'Онлайн'}
-                    />
-                  </div>
+                  <Avatar
+                    src={user.avatar}
+                    name={user.username}
+                    status={inCall ? 'busy' : 'online'}
+                    size="md"
+                  />
 
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
@@ -145,26 +152,44 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Current User Card */}
-      <div className="p-3 border-t border-gray-800/80 bg-gray-900/40 flex items-center justify-between">
+      <div
+        onClick={onOpenProfile}
+        className="p-3 border-t border-gray-800/80 bg-gray-900/40 hover:bg-gray-900/80 cursor-pointer flex items-center justify-between group transition-all"
+        title="Нажмите, чтобы настроить аватарку и профиль"
+      >
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-sm flex-shrink-0">
-            {currentUser.username.charAt(0).toUpperCase()}
+          <div className="relative shrink-0">
+            <Avatar
+              src={currentUser.avatar}
+              name={currentUser.username}
+              online={true}
+              size="md"
+            />
+            <div className="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-[11px] text-white backdrop-blur-[1px]">
+              <Settings className="w-3.5 h-3.5" />
+            </div>
           </div>
           <div className="min-w-0">
-            <h4 className="font-semibold text-sm text-white truncate">
-              {currentUser.username}
-            </h4>
-            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              <span>Вы в сети</span>
+            <div className="flex items-center gap-1.5">
+              <h4 className="font-semibold text-sm text-white truncate">
+                {currentUser.username}
+              </h4>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-emerald-400 group-hover:text-purple-300 transition-colors">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 group-hover:bg-purple-400" />
+              <span className="group-hover:hidden">Вы в сети</span>
+              <span className="hidden group-hover:inline">Сменить аватар</span>
             </div>
           </div>
         </div>
 
         <button
-          onClick={onLogout}
+          onClick={e => {
+            e.stopPropagation();
+            onLogout();
+          }}
           title="Сменить ник / Выйти"
-          className="p-2 rounded-lg hover:bg-gray-800 text-gray-400 hover:text-red-400 transition-colors"
+          className="p-2 rounded-lg hover:bg-gray-800 text-gray-400 hover:text-red-400 transition-colors shrink-0"
         >
           <LogOut className="w-4 h-4" />
         </button>

@@ -1,10 +1,12 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import { User, ChatMessage } from './types.js';
+import { initDatabase, dbSaveUser, dbGetUser, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,8 +14,12 @@ const clientDistPath = path.resolve(__dirname, '../../client/dist');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(clientDistPath));
+
+// Initialize PostgreSQL database connection
+initDatabase().catch(err => console.error('[Neon DB Init Error]', err));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -40,6 +46,7 @@ function getOnlineUsersList(): User[] {
     id: u.id,
     socketId: u.socketId,
     username: u.username,
+    avatar: u.avatar,
     online: u.online,
     inCallWith: u.inCallWith,
   }));
@@ -53,22 +60,90 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', onlineCount: usersBySocketId.size });
 });
 
+// Auto-updater endpoints
+app.get('/api/updates/check', async (_req, res) => {
+  try {
+    const release = await dbGetLatestRelease(false);
+    if (!release) {
+      return res.json({ available: false });
+    }
+    res.json({
+      available: true,
+      latestVersion: release.version,
+      releaseNotes: release.releaseNotes || '',
+      downloadUrl: release.downloadUrl || null,
+      hasPayload: (release as any).hasPayload,
+      timestamp: release.timestamp,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/updates/download/:version', async (req, res) => {
+  try {
+    const version = req.params.version;
+    const localAsarPath = path.resolve(__dirname, '../../release/win-unpacked/resources/app.asar');
+    if (fs.existsSync(localAsarPath)) {
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="app-${version}.asar"`);
+      return res.sendFile(localAsarPath);
+    }
+    const base64 = await dbGetReleasePayload(version);
+    if (!base64) {
+      return res.status(404).json({ error: 'Release payload not found for version ' + version });
+    }
+    const buffer = Buffer.from(base64, 'base64');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="app-${version}.asar"`);
+    res.send(buffer);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/updates/publish', async (req, res) => {
+  try {
+    const { version, downloadUrl, releaseNotes, payloadBase64 } = req.body;
+    if (!version) {
+      return res.status(400).json({ error: 'Version is required' });
+    }
+    const success = await dbPublishRelease(version, downloadUrl, releaseNotes, payloadBase64);
+    if (success) {
+      res.json({ success: true, version });
+    } else {
+      res.status(500).json({ error: 'Failed to publish release' });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 io.on('connection', (socket: Socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
 
   // 1. User Registration
-  socket.on('user:register', ({ username }: { username: string }) => {
+  socket.on('user:register', async ({ username, avatar }: { username: string; avatar?: string }) => {
     const cleanName = (username || '').trim() || `User_${socket.id.slice(0, 4)}`;
+    let userAvatar = avatar;
+    if (!userAvatar) {
+      const existing = await dbGetUser(cleanName);
+      if (existing?.avatar) userAvatar = existing.avatar;
+    } else {
+      await dbSaveUser(cleanName, userAvatar);
+    }
+
     const user: User = {
       id: socket.id,
       socketId: socket.id,
       username: cleanName,
+      avatar: userAvatar,
       online: true,
       inCallWith: null,
     };
 
     usersBySocketId.set(socket.id, user);
-    console.log(`[User Registered] ${cleanName} (${socket.id})`);
+    console.log(`[User Registered] ${cleanName} (${socket.id}) with avatar: ${Boolean(userAvatar)}`);
 
     socket.emit('user:registered', {
       user,
@@ -78,13 +153,28 @@ io.on('connection', (socket: Socket) => {
     broadcastUsersList();
   });
 
+  // 1.1. Update User Avatar
+  socket.on('user:update_avatar', async ({ avatar }: { avatar: string }) => {
+    const user = usersBySocketId.get(socket.id);
+    if (!user) return;
+    user.avatar = avatar;
+    await dbSaveUser(user.username, avatar);
+    console.log(`[Avatar Updated] ${user.username} (${socket.id})`);
+    socket.emit('user:updated', user);
+    broadcastUsersList();
+  });
+
   // 2. Load conversation history
-  socket.on('chat:history', ({ recipientId }: { recipientId: string }) => {
+  socket.on('chat:history', async ({ recipientId }: { recipientId: string }) => {
     const sender = usersBySocketId.get(socket.id);
     if (!sender) return;
 
     const key = getConversationKey(sender.id, recipientId);
-    const history = messageHistory.get(key) || [];
+    let history = messageHistory.get(key);
+    if (!history || history.length === 0) {
+      history = await dbGetHistory(key);
+      messageHistory.set(key, history);
+    }
     socket.emit('chat:history_loaded', { recipientId, messages: history });
   });
 
@@ -114,6 +204,7 @@ io.on('connection', (socket: Socket) => {
         id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         senderId: sender.id,
         senderName: sender.username,
+        senderAvatar: sender.avatar,
         recipientId,
         text: trimmedText || undefined,
         mediaUrl: mediaUrl || undefined,
@@ -128,6 +219,9 @@ io.on('connection', (socket: Socket) => {
       // Keep last 200 messages per conversation
       if (existing.length > 200) existing.shift();
       messageHistory.set(key, existing);
+
+      // Save to Neon PostgreSQL asynchronously
+      dbSaveMessage(message, key).catch(err => console.error('[Neon DB Save Message Error]', err));
 
       // Deliver to recipient if online
       socket.to(recipientId).emit('chat:receive', message);
@@ -162,6 +256,7 @@ io.on('connection', (socket: Socket) => {
     socket.to(targetUserId).emit('call:incoming', {
       callerId: caller.id,
       callerName: caller.username,
+      callerAvatar: caller.avatar,
       offer,
     });
   });
@@ -208,6 +303,14 @@ io.on('connection', (socket: Socket) => {
     socket.to(targetUserId).emit('call:ice_candidate', {
       fromUserId: socket.id,
       candidate,
+    });
+  });
+
+  // 7.5 Audio Relay: forward raw audio data between call partners (fallback for when WebRTC P2P fails)
+  socket.on('audio:data', ({ targetUserId, audio }: { targetUserId: string; audio: ArrayBuffer | Buffer | string }) => {
+    socket.to(targetUserId).emit('audio:data', {
+      fromUserId: socket.id,
+      audio,
     });
   });
 

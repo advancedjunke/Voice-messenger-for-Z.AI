@@ -4,6 +4,7 @@ export interface User {
   id: string;
   socketId: string;
   username: string;
+  avatar?: string;
   online: boolean;
   inCallWith?: string | null;
 }
@@ -12,6 +13,7 @@ export interface ChatMessage {
   id: string;
   senderId: string;
   senderName: string;
+  senderAvatar?: string;
   recipientId: string;
   text?: string;
   mediaUrl?: string;
@@ -25,6 +27,7 @@ export type CallStatus = 'idle' | 'calling' | 'ringing' | 'connected';
 export interface ActiveCall {
   partnerId: string;
   partnerName: string;
+  partnerAvatar?: string;
   isCaller: boolean;
   status: CallStatus;
   startTime?: number;

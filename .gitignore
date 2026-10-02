@@ -4,5 +4,9 @@ node_modules/
 *.zip
 .system_generated/
 dist/
+client/dist/
+server/dist/
 client/node_modules/
 server/node_modules/
+release/
+*.log
