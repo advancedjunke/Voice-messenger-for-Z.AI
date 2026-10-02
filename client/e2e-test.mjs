@@ -176,6 +176,31 @@ alice2.emit('call:end', { targetUserId: bob2.id });
 await endP2;
 ok('Звонок завершён корректно', true);
 
+// ─── 8.5 Индикатор «печатает…» (v1.0.10) ───
+console.log('8.5 Индикатор «печатает…»');
+const typingOnP = waitFor(bob2, 'chat:typing', 4000, t => t.fromName === 'Alice' && t.isTyping === true);
+alice2.emit('chat:typing', { recipientId: bob2.id, isTyping: true });
+const typingOn = await typingOnP;
+ok('Bob видит «Alice печатает…»', typingOn.isTyping === true);
+
+const typingOffP = waitFor(bob2, 'chat:typing', 4000, t => t.fromName === 'Alice' && t.isTyping === false);
+alice2.emit('chat:typing', { recipientId: bob2.id, isTyping: false });
+const typingOff = await typingOffP;
+ok('Bob видит остановку «печатает…»', typingOff.isTyping === false);
+
+// ─── 8.6 Read receipts (v1.0.10) ───
+console.log('8.6 Квитанции о прочтении');
+// Bob подтверждает прочтение сообщений Alice → Alice получает chat:read_ack
+const readAckP = waitFor(alice2, 'chat:read_ack', 4000, a => a.readerName === 'Bob');
+bob2.emit('chat:read', { partnerUsername: 'Alice' });
+const readAck = await readAckP;
+ok('Alice получила chat:read_ack от Bob', readAck.readerName === 'Bob');
+// обратное направление
+const readAck2P = waitFor(bob2, 'chat:read_ack', 4000, a => a.readerName === 'Alice');
+alice2.emit('chat:read', { partnerUsername: 'Bob' });
+const readAck2 = await readAck2P;
+ok('Bob получил chat:read_ack от Alice', readAck2.readerName === 'Alice');
+
 // ─── 9. Оффлайн-цель: call:initiate на несуществующего ───
 console.log('9. Вызов несуществующего пользователя');
 const failP = waitFor(alice2, 'call:failed', 4000);

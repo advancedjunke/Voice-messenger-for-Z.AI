@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import type { User } from '../types.js';
-import { Phone, Search, Users, LogOut, Settings } from 'lucide-react';
+import { Phone, Search, Users, LogOut, Settings, Bell, BellOff } from 'lucide-react';
 import { Avatar } from './Avatar.js';
 
 interface SidebarProps {
@@ -19,6 +19,9 @@ interface SidebarProps {
     releaseNotes?: string;
   } | null;
   serverUrl?: string;
+  typingUsers?: Record<string, number>;
+  soundEnabled?: boolean;
+  onToggleSound?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -33,6 +36,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   socketConnected = true,
   updateInfo = null,
   serverUrl = '',
+  typingUsers = {},
+  soundEnabled = true,
+  onToggleSound,
 }) => {
   const [search, setSearch] = useState('');
 
@@ -86,7 +92,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <h1 className="font-bold text-base text-white tracking-tight leading-none">
                 VoiceChat
               </h1>
-              <span className="text-[10px] text-purple-400 font-mono">v1.0.9</span>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.10</span>
             </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
@@ -137,6 +143,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span>🚀 Обновление v{updateInfo.latestVersion}!</span>
             </button>
           )}
+
+          {onToggleSound && (
+            <button
+              type="button"
+              onClick={onToggleSound}
+              title={soundEnabled ? 'Выключить звук уведомлений' : 'Включить звук уведомлений'}
+              className={`inline-flex items-center justify-center w-6 h-6 rounded-full border cursor-pointer transition-all hover:scale-110 active:scale-95 ${
+                soundEnabled
+                  ? 'bg-gray-800/60 text-gray-400 border-gray-700 hover:text-emerald-400'
+                  : 'bg-gray-800/60 text-gray-600 border-gray-800 hover:text-gray-400'
+              }`}
+            >
+              {soundEnabled ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
+            </button>
+          )}
         </div>
       </div>
 
@@ -182,8 +203,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         {user.username}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-500 truncate">
-                      {inCall ? (
+                    <p className="text-xs truncate">
+                      {typingUsers[user.username] ? (
+                        <span className="text-purple-400 font-medium inline-flex items-center">
+                          печатает
+                          <span className="typing-dots">
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                            <span className="typing-dot" />
+                          </span>
+                        </span>
+                      ) : inCall ? (
                         <span className="text-amber-400">В звонке</span>
                       ) : (
                         <span className="text-emerald-500/90">В сети</span>

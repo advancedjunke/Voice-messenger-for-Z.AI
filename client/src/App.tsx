@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
 import type { User, ChatMessage, MessageType } from './types.js';
 import { useWebRTC } from './hooks/useWebRTC.js';
+import { audioTone } from './utils/audioTone.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
 import { LoginModal } from './components/LoginModal.js';
@@ -36,7 +37,7 @@ function getEffectiveServerUrl(): string {
 }
 
 export function App() {
-  const APP_VERSION = '1.0.9'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.10'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');
@@ -54,6 +55,17 @@ export function App() {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [needPassword, setNeedPassword] = useState(false);
+
+  // v1.0.10: индикаторы «печатает…» (username → таймстамп последнего события)
+  const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
+  const typingTimeoutsRef = useRef<Record<string, number>>({});
+  // v1.0.10: звук уведомлений (сохраняется в localStorage)
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => localStorage.getItem('vm_sound') !== '0');
+  const soundEnabledRef = useRef(soundEnabled);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  // ref текущего выбранного пользователя (для read-квитанций и звуков)
+  const selectedUserRef = useRef<User | null>(null);
+  useEffect(() => { selectedUserRef.current = selectedUser; }, [selectedUser]);
 
   const socketRef = useRef<Socket | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
@@ -170,17 +182,57 @@ export function App() {
         [partnerName]: [...(prev[partnerName] || []), message],
       }));
 
-      // Счётчик непрочитанных (по имени)
+      // v1.0.10: счётчик непрочитанных, звук и read-квитанции
       if (!isMine) {
-        setSelectedUser(currSelected => {
-          if (!currSelected || currSelected.username !== partnerName) {
-            setUnreadCounts(prevCounts => ({
-              ...prevCounts,
-              [partnerName]: (prevCounts[partnerName] || 0) + 1,
-            }));
+        const openPartner = selectedUserRef.current?.username;
+        if (openPartner === partnerName && document.hasFocus()) {
+          // чат открыт и вкладка в фокусе — сразу подтверждаем прочтение
+          socketRef.current?.emit('chat:read', { partnerUsername: partnerName });
+        } else {
+          setUnreadCounts(prevCounts => ({
+            ...prevCounts,
+            [partnerName]: (prevCounts[partnerName] || 0) + 1,
+          }));
+          if (soundEnabledRef.current) {
+            audioTone.playMessageTone();
           }
-          return currSelected;
-        });
+        }
+      }
+    });
+
+    // v1.0.10: собеседник прочитал мои сообщения → ✓ превращаются в ✓✓
+    socket.on('chat:read_ack', ({ readerName }: { readerName: string }) => {
+      setConversations(prev => {
+        const conv = prev[readerName];
+        if (!conv || !conv.some(m => !m.read)) return prev;
+        return {
+          ...prev,
+          [readerName]: conv.map(m => (m.read ? m : { ...m, read: true })),
+        };
+      });
+    });
+
+    // v1.0.10: индикатор «печатает…» с авто-затуханием через 3с
+    socket.on('chat:typing', ({ fromName, isTyping }: { fromName: string; isTyping: boolean }) => {
+      setTypingUsers(prev => {
+        const next = { ...prev };
+        if (isTyping) next[fromName] = Date.now();
+        else delete next[fromName];
+        return next;
+      });
+      const timers = typingTimeoutsRef.current;
+      if (timers[fromName]) {
+        clearTimeout(timers[fromName]);
+        delete timers[fromName];
+      }
+      if (isTyping) {
+        timers[fromName] = window.setTimeout(() => {
+          setTypingUsers(prev => {
+            const next = { ...prev };
+            delete next[fromName];
+            return next;
+          });
+        }, 3000);
       }
     });
 
@@ -199,6 +251,34 @@ export function App() {
       socket.disconnect();
     };
   }, [serverUrl]);
+
+  // v1.0.10: заголовок вкладки с количеством непрочитанных
+  useEffect(() => {
+    const total = Object.values(unreadCounts).reduce((a, b) => a + (b || 0), 0);
+    document.title = total > 0 ? `(${total}) Voice Messenger` : 'Voice Messenger';
+  }, [unreadCounts]);
+
+  // v1.0.10: при возврате фокуса на вкладку — подтверждаем прочтение открытого чата
+  useEffect(() => {
+    const handleFocus = () => {
+      const open = selectedUserRef.current;
+      if (open) {
+        socketRef.current?.emit('chat:read', { partnerUsername: open.username });
+        setUnreadCounts(prev => ({ ...prev, [open.username]: 0 }));
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
+  // v1.0.10: переключатель звука
+  const handleToggleSound = useCallback(() => {
+    setSoundEnabled(prev => {
+      const next = !prev;
+      localStorage.setItem('vm_sound', next ? '1' : '0');
+      return next;
+    });
+  }, []);
 
   // WebRTC Hook
   const {
@@ -255,6 +335,8 @@ export function App() {
       ...prev,
       [user.username]: 0,
     }));
+    // v1.0.10: сразу подтверждаем прочтение прошлых сообщений
+    socketRef.current?.emit('chat:read', { partnerUsername: user.username });
     // Request chat history from server (по стабильному имени)
     if (socketRef.current) {
       socketRef.current.emit('chat:history', { recipientId: user.id, recipientUsername: user.username });
@@ -309,6 +391,9 @@ export function App() {
             socketConnected={socketConnected}
             updateInfo={updateInfo}
             serverUrl={serverUrl}
+            typingUsers={typingUsers}
+            soundEnabled={soundEnabled}
+            onToggleSound={handleToggleSound}
           />
 
           <ChatArea
@@ -318,6 +403,8 @@ export function App() {
             activeCall={activeCall}
             onSendMessage={handleSendMessage}
             onStartCall={handleStartCall}
+            isPartnerTyping={selectedUser ? Boolean(typingUsers[selectedUser.username]) : false}
+            onTyping={(recipientId, isTyping) => socketRef.current?.emit('chat:typing', { recipientId, isTyping })}
           />
 
           {/* Voice Call Active / Incoming Modal */}

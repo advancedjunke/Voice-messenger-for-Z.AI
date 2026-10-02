@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { User, ChatMessage, ActiveCall, MessageType } from '../types.js';
-import { Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X } from 'lucide-react';
+import { Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X, Smile, Check, CheckCheck } from 'lucide-react';
 import { AudioMessagePlayer } from './AudioMessagePlayer.js';
 import { VoiceRecorder } from './VoiceRecorder.js';
 import { Avatar } from './Avatar.js';
@@ -18,7 +18,18 @@ interface ChatAreaProps {
     duration?: number;
   }) => void;
   onStartCall: (user: User) => void;
+  isPartnerTyping?: boolean;
+  onTyping?: (recipientId: string, isTyping: boolean) => void;
 }
+
+// v1.0.10: набор эмодзи для быстрой вставки
+const EMOJIS = [
+  '😀', '😁', '😂', '🤣', '😊', '😍', '😘', '😎',
+  '🤔', '😐', '😴', '😭', '😡', '🤯', '😇', '🙃',
+  '👍', '👎', '👏', '🙏', '💪', '🤝', '✌️', '🫡',
+  '🔥', '❤️', '💜', '✨', '🎉', '🎁', '💯', '⚡',
+  '☕', '🍕', '⚽', '🚀', '🎮', '🎵', '🐱', '🌙',
+];
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
   currentUser,
@@ -27,14 +38,18 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   activeCall,
   onSendMessage,
   onStartCall,
+  isPartnerTyping = false,
+  onTyping,
 }) => {
   const [inputText, setInputText] = useState('');
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [selectedLightboxImage, setSelectedLightboxImage] = useState<string | null>(null);
+  const [showEmoji, setShowEmoji] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastTypingSentRef = useRef(0);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -46,6 +61,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleSendText = (e: React.FormEvent) => {
     e.preventDefault();
+    // v1.0.10: при отправке гасим индикатор «печатает…» и закрываем эмодзи-панель
+    if (recipient && onTyping) onTyping(recipient.id, false);
+    setShowEmoji(false);
+
     if (previewImage) {
       onSendMessage({
         text: inputText.trim() || undefined,
@@ -64,6 +83,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       });
       setInputText('');
     }
+  };
+
+  // v1.0.10: ввод текста → информируем собеседника «печатает…» (не чаще раза в 1.5с)
+  const handleInputChange = (value: string) => {
+    setInputText(value);
+    if (!recipient || !onTyping) return;
+    const now = Date.now();
+    if (value.trim() && now - lastTypingSentRef.current > 1500) {
+      lastTypingSentRef.current = now;
+      onTyping(recipient.id, true);
+    }
+  };
+
+  // v1.0.10: вставка эмодзи в позицию курсора (или в конец)
+  const handleEmojiSelect = (emoji: string) => {
+    setInputText(prev => prev + emoji);
+    setShowEmoji(false);
   };
 
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -167,7 +203,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               {recipient.username}
             </h3>
             <p className="text-xs text-gray-400">
-              {recipient.inCallWith ? (
+              {isPartnerTyping ? (
+                <span className="text-purple-400 font-medium inline-flex items-center">
+                  печатает
+                  <span className="typing-dots">
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                  </span>
+                </span>
+              ) : recipient.inCallWith ? (
                 <span className="text-amber-400">В разговоре с другим пользователем</span>
               ) : (
                 <span className="text-emerald-400">В сети и готов к общению</span>
@@ -196,7 +241,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       </div>
 
       {/* Messages Stream */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+      <div className="flex-1 overflow-y-auto p-6">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-sm mx-auto my-auto animate-in fade-in duration-300">
             <div className="relative mb-3">
@@ -230,34 +275,61 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             </button>
           </div>
         ) : (
-          messages.map(msg => {
-            // FIX: сравниваем по СТАБИЛЬНОМУ имени (socket.id меняется при реконнекте,
-            // из-за чего старые сообщения «перепутывались» стороны)
+          messages.map((msg, idx) => {
+            // FIX: сравниваем по СТАБИЛЬНОМУ имени (socket.id меняется при реконнекте)
             const isMe = msg.senderName === currentUser.username;
             const isWave = msg.mediaUrl === '/wave.webp';
+
+            // v1.0.10: группировка подряд идущих сообщений одного автора (как в Telegram/Discord)
+            const prevMsg = idx > 0 ? messages[idx - 1] : null;
+            const isGrouped = Boolean(
+              prevMsg &&
+              !isWave &&
+              prevMsg.senderName === msg.senderName &&
+              msg.mediaType !== 'image' &&
+              (msg.timestamp - prevMsg.timestamp) < 3 * 60 * 1000
+            );
+            const isFirst = idx === 0;
+            const rowMargin = isFirst || !isGrouped ? 'mt-0' : 'mt-0.5';
+
+            // v1.0.10: галочка прочтения для своих сообщений
+            const receipt = isMe ? (
+              msg.read ? (
+                <CheckCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-label="Прочитано" />
+              ) : (
+                <Check className="w-3.5 h-3.5 text-gray-500 shrink-0" aria-label="Отправлено" />
+              )
+            ) : null;
 
             return (
               <div
                 key={msg.id}
-                className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
+                className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'} ${rowMargin} ${idx === messages.length - 1 ? 'animate-msg-in' : ''}`}
               >
-                {/* Sender Avatar */}
-                <Avatar
-                  src={isMe ? currentUser.avatar : (msg.senderAvatar || recipient.avatar)}
-                  name={isMe ? currentUser.username : msg.senderName}
-                  size="sm"
-                  className="mb-1 shrink-0"
-                />
+                {/* Sender Avatar (в группировке — прозрачный распорка) */}
+                {isGrouped ? (
+                  <div className="w-8 shrink-0" aria-hidden />
+                ) : (
+                  <Avatar
+                    src={isMe ? currentUser.avatar : (msg.senderAvatar || recipient.avatar)}
+                    name={isMe ? currentUser.username : msg.senderName}
+                    size="sm"
+                    className="mb-1 shrink-0"
+                  />
+                )}
 
                 <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
-                  <div className="flex items-baseline gap-2 mb-1 px-1">
-                    <span className="text-xs font-semibold text-gray-400">
-                      {isMe ? 'Вы' : msg.senderName}
-                    </span>
-                    <span className="text-[11px] text-gray-500">
-                      {formatTime(msg.timestamp)}
-                    </span>
-                  </div>
+                  {!isGrouped && (
+                    <div className="flex items-baseline gap-2 mb-1 px-1">
+                      <span className="text-xs font-semibold text-gray-400">
+                        {isMe ? 'Вы' : msg.senderName}
+                      </span>
+                      <span className="text-[11px] text-gray-500">
+                        {formatTime(msg.timestamp)}
+                      </span>
+                      {receipt}
+                    </div>
+                  )}
 
                   {isWave ? (
                     /* Discord-style wave greeting card */
@@ -281,10 +353,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     </div>
                   ) : (
                     <div
-                      className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words ${
+                      title={`${msg.senderName} · ${formatTime(msg.timestamp)}`}
+                      className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed shadow-md break-words transition-shadow hover:shadow-lg ${
                         isMe
-                          ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-tr-none'
-                          : 'bg-gray-900 border border-gray-800 text-gray-200 rounded-tl-none'
+                          ? 'bg-gradient-to-br from-indigo-600 to-purple-600 text-white ' + (isGrouped ? 'rounded-tr-xl' : 'rounded-tr-none')
+                          : 'bg-gray-900 border border-gray-800 text-gray-200 ' + (isGrouped ? 'rounded-tl-xl' : 'rounded-tl-none')
                       }`}
                     >
                       {/* Image Attachment */}
@@ -310,6 +383,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                       {/* Text content if present */}
                       {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
+                    </div>
+                  )}
+
+                  {/* v1.0.10: в группировке время + галочка — под пузырём */}
+                  {isGrouped && (
+                    <div className={`flex items-center gap-1 px-1 mt-0.5 ${isMe ? 'flex-row-reverse' : ''}`}>
+                      <span className="text-[10px] text-gray-600">{formatTime(msg.timestamp)}</span>
+                      {receipt}
                     </div>
                   )}
                 </div>
@@ -394,13 +475,51 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               />
             </button>
 
+            {/* v1.0.10: Emoji picker */}
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowEmoji(v => !v)}
+                title="Эмодзи"
+                className={`p-3 rounded-xl transition-colors ${showEmoji ? 'text-purple-400 bg-gray-900' : 'text-gray-400 hover:text-purple-400 hover:bg-gray-900'}`}
+              >
+                <Smile className="w-5 h-5" />
+              </button>
+
+              {showEmoji && (
+                <>
+                  {/* Невидимый фон для закрытия по клику вне */}
+                  <button
+                    type="button"
+                    aria-label="Закрыть эмодзи"
+                    onClick={() => setShowEmoji(false)}
+                    className="fixed inset-0 z-40 cursor-default"
+                    tabIndex={-1}
+                  />
+                  <div className="absolute bottom-full mb-2 right-0 z-50 animate-emoji-pop bg-gray-900 border border-gray-700 rounded-2xl p-3 shadow-2xl grid grid-cols-8 gap-1 w-[268px]">
+                    {EMOJIS.map(emoji => (
+                      <button
+                        key={emoji}
+                        type="button"
+                        onClick={() => handleEmojiSelect(emoji)}
+                        className="text-xl p-1 rounded-lg hover:bg-gray-800 hover:scale-110 transition-all text-center leading-none"
+                        aria-label={`Вставить ${emoji}`}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
             {/* Text input */}
             <input
               type="text"
               value={inputText}
-              onChange={e => setInputText(e.target.value)}
+              onChange={e => handleInputChange(e.target.value)}
               placeholder={previewImage ? 'Добавить подпись...' : `Сообщение для ${recipient.username}...`}
-              className="flex-1 px-4 py-3 bg-gray-900/90 border border-gray-800 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+              className="flex-1 px-4 py-3 bg-gray-900/90 border border-gray-800 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
             />
 
             {/* Send button */}

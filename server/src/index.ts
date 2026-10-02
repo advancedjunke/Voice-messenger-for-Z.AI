@@ -281,6 +281,7 @@ io.on('connection', (socket: Socket) => {
         mediaUrl: mediaUrl || undefined,
         mediaType: mediaType || 'text',
         duration: duration || undefined,
+        read: false,
         timestamp: Date.now(),
       };
 
@@ -301,6 +302,43 @@ io.on('connection', (socket: Socket) => {
       socket.emit('chat:receive', message);
     }
   );
+
+  // 3.5 Typing indicator — relay only, без состояния на сервере
+  socket.on('chat:typing', ({ recipientId, isTyping }: { recipientId: string; isTyping: boolean }) => {
+    const sender = usersBySocketId.get(socket.id);
+    if (!sender || !recipientId) return;
+    socket.to(recipientId).emit('chat:typing', {
+      fromName: sender.username,
+      isTyping: Boolean(isTyping),
+    });
+  });
+
+  // 3.6 Read receipts: получатель подтверждает прочтение
+  socket.on('chat:read', ({ partnerUsername }: { partnerUsername: string }) => {
+    const reader = usersBySocketId.get(socket.id);
+    if (!reader || !partnerUsername) return;
+
+    const key = getConversationKey(reader.username, partnerUsername);
+    const history = messageHistory.get(key);
+    let changed = 0;
+    if (history) {
+      for (const m of history) {
+        // отмечаем прочитанными сообщения, ОТПРАВЛЕННЫЕ СОБЕСЕДНИКОМ
+        if (m.senderName.toLowerCase() === partnerUsername.toLowerCase() && !m.read) {
+          m.read = true;
+          changed++;
+        }
+      }
+    }
+    if (changed > 0) console.log(`[Chat Read] ${reader.username} прочитал ${changed} сообщ. от ${partnerUsername}`);
+
+    // уведомляем все сокеты собеседника — его ✓ станут ✓✓
+    for (const [sId, u] of usersBySocketId.entries()) {
+      if (u.username.toLowerCase() === partnerUsername.toLowerCase()) {
+        io.to(sId).emit('chat:read_ack', { readerName: reader.username, partnerName: u.username });
+      }
+    }
+  });
 
   // 4. WebRTC Signaling: Initiate Call (Offer)
   socket.on('call:initiate', ({ targetUserId, offer }: { targetUserId: string; offer: any }) => {

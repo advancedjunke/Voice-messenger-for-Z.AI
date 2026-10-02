@@ -20,6 +20,7 @@ export interface ChatMessage {
   mediaUrl?: string;
   mediaType?: MessageType;
   duration?: number;
+  read?: boolean;
   timestamp: number;
 }
 

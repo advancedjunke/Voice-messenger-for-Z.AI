@@ -118,6 +118,32 @@ class AudioToneManager {
     osc.start();
     osc.stop(ctx.currentTime + 0.4);
   }
+
+  // НОВОЕ: короткий ненавязчивый звук нового сообщения (две ноты вверх)
+  playMessageTone() {
+    try {
+      const ctx = this.getContext();
+      const notes = [659.25, 987.77]; // E5 → B5
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const t = ctx.currentTime + i * 0.09;
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.0, t);
+        gain.gain.linearRampToValueAtTime(0.06, t + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.25);
+      });
+    } catch {
+      // звук не критичен
+    }
+  }
 }
 
 export const audioTone = new AudioToneManager();
