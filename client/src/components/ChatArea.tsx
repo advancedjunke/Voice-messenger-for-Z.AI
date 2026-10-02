@@ -130,7 +130,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   return (
     <div
-      key={recipient.id}
+      key={recipient.username}
       className="flex-1 h-full flex flex-col bg-gray-950/30 relative animate-chat-switch overflow-hidden"
     >
       {/* Lightbox for viewing full-size images */}
@@ -231,7 +231,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         ) : (
           messages.map(msg => {
-            const isMe = msg.senderId === currentUser.id;
+            // FIX: сравниваем по СТАБИЛЬНОМУ имени (socket.id меняется при реконнекте,
+            // из-за чего старые сообщения «перепутывались» стороны)
+            const isMe = msg.senderName === currentUser.username;
             const isWave = msg.mediaUrl === '/wave.webp';
 
             return (

@@ -28,6 +28,8 @@ namespace VoiceMessengerLauncher
         // Configuration
         private const string NEON_URL = "https://ep-steep-snow-b5qfejq3.c-7.us-east-2.aws.neon.tech/sql";
         private const string NEON_CONN = "postgresql://neondb_owner:npg_a47wDOrGSTFc@ep-steep-snow-b5qfejq3.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require";
+        // Сервер мессенджера — резервный источник обновлений (payload хранится в БД Neon)
+        private const string SERVER_UPDATE_URL = "https://f2f9c29f9c574a2c-217-199-233-97.serveousercontent.com";
 
         // State
         private string localVersion = "1.0.0";
@@ -284,12 +286,21 @@ namespace VoiceMessengerLauncher
 
             try
             {
-                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                // FIX «Базовое соединение закрыто»: включаем ВСЕ современные протоколы TLS
+                try
+                {
+                    ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768 | SecurityProtocolType.Tls;
+                    ServicePointManager.Expect100Continue = false;
+                    ServicePointManager.DefaultConnectionLimit = 8;
+                }
+                catch { }
+
                 var request = (HttpWebRequest)WebRequest.Create(NEON_URL);
                 request.Method = "POST";
                 request.ContentType = "application/json";
                 request.Headers["Neon-Connection-String"] = NEON_CONN;
                 request.Timeout = 10000;
+                request.KeepAlive = false;
 
                 string query = "{\"query\":\"SELECT version, download_url, release_notes, timestamp FROM app_releases ORDER BY timestamp DESC LIMIT 1;\"}";
                 byte[] queryBytes = Encoding.UTF8.GetBytes(query);
@@ -415,23 +426,32 @@ namespace VoiceMessengerLauncher
                 }
                 else if (!string.IsNullOrEmpty(downloadUrl))
                 {
-                    try
-                    {
-                        ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768 | SecurityProtocolType.Tls;
-                    }
-                    catch { }
+                    // FIX «Базовое соединение закрыто»: цепочка источников + надёжная загрузка
+                    // с ретраями и докачкой. Сначала пробуем сервер мессенджера (payload из БД),
+                    // затем исходный CDN-URL (catbox и т.п.)
+                    string serverSrc = SERVER_UPDATE_URL + "/api/updates/download/" + newVer;
+                    string[] sources;
+                    if (!string.IsNullOrEmpty(downloadUrl) && downloadUrl != serverSrc)
+                        sources = new string[] { serverSrc, downloadUrl };
+                    else
+                        sources = new string[] { serverSrc, downloadUrl };
 
-                    using (var client = new WebClient())
+                    bool downloaded = false;
+                    string lastError = "источник недоступен";
+                    foreach (var src in sources)
                     {
-                        client.Proxy = null;
-                        client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-                        client.DownloadProgressChanged += (s, ev) => {
-                            SetProgress((float)ev.ProgressPercentage);
-                        };
-                        Log("Calling DownloadFile: " + downloadUrl);
-                        client.DownloadFile(new Uri(downloadUrl), tempDownloadPath);
-                        Log("DownloadFile finished. Exists=" + File.Exists(tempDownloadPath));
+                        if (string.IsNullOrEmpty(src)) continue;
+                        Log("Trying download source: " + src);
+                        string err;
+                        if (DownloadWithResume(src, tempDownloadPath, out err))
+                        {
+                            downloaded = true;
+                            break;
+                        }
+                        if (!string.IsNullOrEmpty(err)) lastError = err;
                     }
+                    if (!downloaded)
+                        throw new Exception("Не удалось скачать обновление: " + lastError);
                 }
 
                 if (File.Exists(tempDownloadPath) && new FileInfo(tempDownloadPath).Length > 0)
@@ -484,6 +504,56 @@ namespace VoiceMessengerLauncher
             {
                 isUpdating = false;
             }
+        }
+
+        // FIX «Базовое соединение закрыто»: надёжная загрузка файла с ретраями и докачкой.
+        // KeepAlive=false и TLS 1.2 устраняют обрыв соединения на больших файлах (app.asar ~ мегабайты).
+        private bool DownloadWithResume(string url, string destPath, out string error)
+        {
+            error = null;
+            for (int attempt = 1; attempt <= 4; attempt++)
+            {
+                try
+                {
+                    long already = File.Exists(destPath) ? new FileInfo(destPath).Length : 0;
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                    req.KeepAlive = false;                       // главная причина «Базовое соединение закрыто»
+                    req.Proxy = null;
+                    req.Timeout = 30000;
+                    req.ReadWriteTimeout = 60000;
+                    req.AllowAutoRedirect = true;
+                    req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+                    if (already > 0) req.AddRange(already);      // докачка с места обрыва
+
+                    using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        bool resume = resp.StatusCode == HttpStatusCode.PartialContent && already > 0;
+                        using (var fs = new FileStream(destPath, resume ? FileMode.Append : FileMode.Create, FileAccess.Write))
+                        using (var stream = resp.GetResponseStream())
+                        {
+                            long total = resp.ContentLength;
+                            long done = 0;
+                            byte[] buf = new byte[65536];
+                            int read;
+                            while ((read = stream.Read(buf, 0, buf.Length)) > 0)
+                            {
+                                fs.Write(buf, 0, read);
+                                done += read;
+                                if (total > 0) SetProgress(Math.Min(99f, (float)(done * 95.0 / total)));
+                            }
+                        }
+                    }
+                    Log("Download OK from: " + url);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                    Log("Download attempt " + attempt + "/4 failed for " + url + ": " + ex.Message);
+                    Thread.Sleep(1200); // пауза перед повтором (докачка продолжится с места обрыва)
+                }
+            }
+            return false;
         }
 
         private bool IsNewer(string remote, string local)

@@ -12,6 +12,13 @@ interface SidebarProps {
   onStartCall: (user: User) => void;
   onLogout: () => void;
   onOpenProfile?: () => void;
+  socketConnected?: boolean;
+  updateInfo?: {
+    available: boolean;
+    latestVersion?: string;
+    releaseNotes?: string;
+  } | null;
+  serverUrl?: string;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -23,8 +30,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onStartCall,
   onLogout,
   onOpenProfile,
+  socketConnected = true,
+  updateInfo = null,
+  serverUrl = '',
 }) => {
   const [search, setSearch] = useState('');
+
+  // FIX: бейджи статуса встроены в сайдбар вместо fixed-оверлея,
+  // который перекрывал кнопку «Позвонить»
+  const handleChangeServer = () => {
+    const current = localStorage.getItem('vm_server_url') || serverUrl;
+    const next = prompt('Адрес сервера мессенджера (например, IP друга или облачный хостинг):', current);
+    if (next !== null) {
+      if (next.trim()) {
+        localStorage.setItem('vm_server_url', next.trim());
+      } else {
+        localStorage.removeItem('vm_server_url');
+      }
+      window.location.reload();
+    }
+  };
+
+  const handleShowUpdate = () => {
+    alert(
+      `🚀 Доступно обновление v${updateInfo?.latestVersion}!\n\nЧто нового:\n${
+        updateInfo?.releaseNotes || 'Улучшения стабильности и звонков'
+      }\n\nЧтобы обновить приложение, закройте его и запустите ярлык «Voice Launcher» на Рабочем столе (или в папке приложения).`
+    );
+  };
 
   // Exclude current user from the contact list
   const otherUsers = users.filter(u => u.id !== currentUser.id);
@@ -53,7 +86,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <h1 className="font-bold text-base text-white tracking-tight leading-none">
                 VoiceChat
               </h1>
-              <span className="text-[10px] text-purple-400 font-mono">v1.0.8</span>
+              <span className="text-[10px] text-purple-400 font-mono">v1.0.9</span>
             </div>
           </div>
           <span className="flex items-center gap-1.5 px-2.5 py-1 bg-gray-900 border border-gray-800 rounded-full text-xs text-gray-400 font-medium">
@@ -72,6 +105,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
             placeholder="Поиск собеседника..."
             className="w-full pl-9 pr-4 py-2 bg-gray-900/90 border border-gray-800 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
           />
+        </div>
+
+        {/* FIX: Status & update badges — встроены в сайдбар, не перекрывают кнопки */}
+        <div className="flex items-center gap-2 mt-2 flex-wrap">
+          <button
+            type="button"
+            onClick={handleChangeServer}
+            title="Кликните, чтобы изменить адрес сервера"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium cursor-pointer hover:scale-105 active:scale-95 transition-all ${
+              socketConnected
+                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'
+                : 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                socketConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'
+              }`}
+            />
+            {socketConnected ? 'Сервер подключен' : 'Настроить сервер'}
+          </button>
+
+          {updateInfo?.available && (
+            <button
+              type="button"
+              onClick={handleShowUpdate}
+              title="Нажмите для подробностей об обновлении"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/40 hover:bg-purple-500/30 transition-all cursor-pointer animate-pulse"
+            >
+              <span>🚀 Обновление v{updateInfo.latestVersion}!</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -15,10 +15,11 @@ export interface ChatMessage {
   senderName: string;
   senderAvatar?: string;
   recipientId: string;
+  recipientName?: string;
   text?: string;
   mediaUrl?: string;
   mediaType?: MessageType;
-  duration?: number; // in seconds for voice messages
+  duration?: number;
   timestamp: number;
 }
 

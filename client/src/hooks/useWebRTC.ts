@@ -62,6 +62,17 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
   const iceTimeoutRef = useRef<number | null>(null);
   const audioModeRef = useRef<AudioMode>('webrtc');
 
+  // MSE (MediaSource) refs для непрерывного relay-звука
+  // FIX: decodeAudioData не может декодировать webm-чанки MediaRecorder после первого
+  // (они без заголовка EBML) — теперь чанки аппендятся в MediaSource буфер
+  const relayAudioElRef = useRef<HTMLAudioElement | null>(null);
+  const relaySourceBufferRef = useRef<SourceBuffer | null>(null);
+  const relayQueueRef = useRef<ArrayBuffer[]>([]);
+  const relayAppendingRef = useRef(false);
+  const relayHeaderRef = useRef<ArrayBuffer | null>(null);
+  const relayAnalyserAttachedRef = useRef(false);
+  const disconnectGraceRef = useRef<number | null>(null);
+
   // Keep ref in sync with state
   useEffect(() => {
     audioModeRef.current = audioMode;
@@ -188,17 +199,18 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
 
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0 && relayActiveRef.current && partnerIdRef.current) {
-        // Convert to base64 for Socket.io transport
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          if (reader.result && relayActiveRef.current) {
-            socket.emit('audio:data', {
-              targetUserId: partnerIdRef.current,
-              audio: reader.result,
-            });
-          }
-        };
-        reader.readAsDataURL(event.data);
+        // FIX: отправляем бинарный ArrayBuffer вместо base64 — меньше трафика и задержка ниже
+        event.data
+          .arrayBuffer()
+          .then(buffer => {
+            if (relayActiveRef.current && partnerIdRef.current && socket) {
+              socket.emit('audio:data', {
+                targetUserId: partnerIdRef.current,
+                audio: buffer,
+              });
+            }
+          })
+          .catch(() => {});
       }
     };
 
@@ -217,6 +229,21 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
     if (playbackCtxRef.current) {
       try { playbackCtxRef.current.close(); } catch {}
       playbackCtxRef.current = null;
+    }
+    // Cleanup MSE relay playback
+    relayQueueRef.current = [];
+    relayAppendingRef.current = false;
+    relayHeaderRef.current = null;
+    relaySourceBufferRef.current = null;
+    relayAnalyserAttachedRef.current = false;
+    if (relayAudioElRef.current) {
+      try {
+        relayAudioElRef.current.pause();
+        relayAudioElRef.current.removeAttribute('src');
+        relayAudioElRef.current.load();
+      } catch {}
+      relayAudioElRef.current.remove();
+      relayAudioElRef.current = null;
     }
   }, []);
 
@@ -274,6 +301,11 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       pcRef.current = null;
     }
 
+    if (disconnectGraceRef.current) {
+      clearTimeout(disconnectGraceRef.current);
+      disconnectGraceRef.current = null;
+    }
+
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
@@ -325,34 +357,152 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
   useEffect(() => {
     if (!socket) return;
 
-    const handleRelayAudio = async ({ audio }: { fromUserId: string; audio: string }) => {
+    /** Создаём (или переиспользуем) скрытый audio-элемент для relay-воспроизведения */
+    const ensureRelayAudioEl = (): HTMLAudioElement => {
+      if (!relayAudioElRef.current) {
+        const audio = document.createElement('audio');
+        audio.id = 'relay-remote-audio';
+        audio.autoplay = true;
+        (audio as any).playsInline = true;
+        audio.style.display = 'none';
+        document.body.appendChild(audio);
+        relayAudioElRef.current = audio;
+      }
+      return relayAudioElRef.current;
+    };
+
+    /** MSE-плейбек: чанки MediaRecorder аппендятся в непрерывный буфер */
+    const setupMsePlayback = (audio: HTMLAudioElement): boolean => {
+      const canMse =
+        typeof MediaSource !== 'undefined' &&
+        (MediaSource as any).isTypeSupported?.('audio/webm;codecs=opus');
+      if (!canMse) return false;
       try {
-        // Initialize playback AudioContext lazily
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
-          playbackCtxRef.current = new AudioCtx({ sampleRate: 48000 });
+        const ms = new MediaSource();
+        audio.src = URL.createObjectURL(ms);
+        audio.play().catch(() => {});
+        ms.addEventListener('sourceopen', () => {
+          try {
+            const sb = ms.addSourceBuffer('audio/webm;codecs=opus');
+            sb.mode = 'sequence'; // терпим к «дырам» в таймстампах между чанками
+            sb.addEventListener('updateend', () => {
+              relayAppendingRef.current = false;
+              const next = relayQueueRef.current.shift();
+              if (next && !sb.updating) {
+                try {
+                  relayAppendingRef.current = true;
+                  sb.appendBuffer(next);
+                } catch {
+                  relayAppendingRef.current = false;
+                }
+              }
+            });
+            relaySourceBufferRef.current = sb;
+            // Прокачиваем уже ожидающие чанки
+            const first = relayQueueRef.current.shift();
+            if (first) {
+              relayAppendingRef.current = true;
+              try {
+                sb.appendBuffer(first);
+              } catch {
+                relayAppendingRef.current = false;
+              }
+            }
+          } catch {}
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const handleRelayAudio = async ({ audio }: { fromUserId: string; audio: ArrayBuffer | Uint8Array | string }) => {
+      try {
+        let chunk: ArrayBuffer;
+        if (typeof audio === 'string') {
+          // Совместимость со старым клиентом (base64 data URL)
+          const response = await fetch(audio);
+          chunk = await response.arrayBuffer();
+        } else if (audio instanceof ArrayBuffer) {
+          chunk = audio;
+        } else {
+          // Двоичные данные приходят как Uint8Array — копируем в ArrayBuffer
+          const u8 = audio as Uint8Array;
+          chunk = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
         }
-        const ctx = playbackCtxRef.current;
-        if (ctx.state === 'suspended') await ctx.resume();
 
-        // Decode base64 data URL to ArrayBuffer
-        const response = await fetch(audio);
-        const arrayBuffer = await response.arrayBuffer();
+        // Первый чанк содержит WebM-заголовки — сохраняем для фолбэка
+        if (!relayHeaderRef.current) {
+          relayHeaderRef.current = chunk.slice(0);
+        }
 
-        // Decode audio and play immediately
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(ctx.destination);
-        source.start(0);
+        const audioEl = ensureRelayAudioEl();
+        const mseReady = Boolean(relaySourceBufferRef.current);
+        if (!mseReady && !audioEl.src) {
+          if (!setupMsePlayback(audioEl)) {
+            (audioEl as any).__useDecodeFallback = true;
+          }
+        }
 
-        // Update remote volume visualizer from decoded data
-        if (audioBuffer.numberOfChannels > 0) {
-          const channelData = audioBuffer.getChannelData(0);
-          let sum = 0;
-          for (let i = 0; i < channelData.length; i++) sum += Math.abs(channelData[i]);
-          const avg = sum / channelData.length;
-          setRemoteVolume(Math.min(100, Math.round(avg * 500)));
+        const sb = relaySourceBufferRef.current;
+        if (sb) {
+          // Основной путь — MSE: непрерывный плавный звук
+          if (sb.updating || relayAppendingRef.current) {
+            relayQueueRef.current.push(chunk);
+          } else {
+            try {
+              relayAppendingRef.current = true;
+              sb.appendBuffer(chunk);
+            } catch {
+              relayAppendingRef.current = false;
+              relayQueueRef.current.push(chunk);
+            }
+          }
+
+          // Подключаем анализатор громкости к media-элементу (один раз)
+          if (!relayAnalyserAttachedRef.current) {
+            try {
+              const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+              if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+                audioContextRef.current = new AudioCtx();
+              }
+              const ctx = audioContextRef.current;
+              if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+              const srcNode = ctx.createMediaElementSource(audioEl);
+              const analyser = ctx.createAnalyser();
+              analyser.fftSize = 64;
+              srcNode.connect(analyser);
+              analyser.connect(ctx.destination);
+              remoteAnalyserRef.current = analyser;
+              relayAnalyserAttachedRef.current = true;
+            } catch {}
+          }
+        } else {
+          // Фолбэк: decodeAudioData с подстановкой WebM-заголовка (чанки без заголовка иначе не декодируются)
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
+            playbackCtxRef.current = new AudioCtx({ sampleRate: 48000 });
+          }
+          const ctx = playbackCtxRef.current;
+          if (ctx.state === 'suspended') await ctx.resume();
+
+          const header = relayHeaderRef.current;
+          const blob = header
+            ? new Blob([header, chunk], { type: 'audio/webm' })
+            : new Blob([chunk], { type: 'audio/webm' });
+          const audioBuffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(ctx.destination);
+          source.start(0);
+
+          if (audioBuffer.numberOfChannels > 0) {
+            const channelData = audioBuffer.getChannelData(0);
+            let sum = 0;
+            for (let i = 0; i < channelData.length; i++) sum += Math.abs(channelData[i]);
+            const avg = sum / channelData.length;
+            setRemoteVolume(Math.min(100, Math.round(avg * 500)));
+          }
         }
       } catch (e) {
         // Silently skip corrupt chunks
@@ -513,10 +663,23 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       }
 
       if (state === 'failed' || state === 'disconnected') {
-        if (!iceConnected && audioModeRef.current !== 'relay') {
-          console.log('[WebRTC] ❌ ICE failed, switching to relay');
-          switchToRelay(partnerId);
+        // FIX: 'disconnected' часто кратковременный (переключение сети, роутинг) — даём 2.5с
+        // на автоматическое восстановление, прежде чем уходить в relay. 'failed' → сразу relay.
+        if (disconnectGraceRef.current) {
+          clearTimeout(disconnectGraceRef.current);
+          disconnectGraceRef.current = null;
         }
+        const graceDelay = state === 'failed' ? 0 : 2500;
+        disconnectGraceRef.current = window.setTimeout(() => {
+          disconnectGraceRef.current = null;
+          if (audioModeRef.current !== 'relay' && pcRef.current === pc) {
+            const ice = pc.iceConnectionState;
+            if (ice === 'failed' || ice === 'disconnected' || ice === 'closed') {
+              console.log('[WebRTC] ❌ ICE не восстановился, переключаюсь на relay');
+              switchToRelay(partnerId);
+            }
+          }
+        }, graceDelay);
       }
     };
 

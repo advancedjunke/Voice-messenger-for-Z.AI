@@ -36,6 +36,8 @@ function getEffectiveServerUrl(): string {
 }
 
 export function App() {
+  const APP_VERSION = '1.0.9'; // синхронизировано с package.json и Sidebar
+
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');
     const savedAvatar = localStorage.getItem('vm_avatar') || undefined;
@@ -45,13 +47,16 @@ export function App() {
   const [serverUrl, setServerUrl] = useState<string>(getEffectiveServerUrl);
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  // FIX: беседы ключуются по СТАБИЛЬНОМУ имени пользователя (не socket.id),
+  // чтобы история не терялась при переподключении
   const [conversations, setConversations] = useState<Record<string, ChatMessage[]>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [needPassword, setNeedPassword] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
-  const [appVersion] = useState('1.0.6');
   const [updateInfo, setUpdateInfo] = useState<{
     available: boolean;
     latestVersion?: string;
@@ -80,12 +85,12 @@ export function App() {
     fetch(`${serverUrl}/api/updates/check`)
       .then(res => res.json())
       .then(data => {
-        if (data && data.available && data.latestVersion && data.latestVersion !== appVersion) {
+        if (data && data.available && data.latestVersion && data.latestVersion !== APP_VERSION) {
           setUpdateInfo(data);
         }
       })
       .catch(() => {});
-  }, [serverUrl, appVersion]);
+  }, [serverUrl]);
 
   // Setup Socket.io connection
   useEffect(() => {
@@ -114,10 +119,26 @@ export function App() {
 
     socket.on('user:registered', ({ user, allUsers }: { user: User; allUsers: User[] }) => {
       setCurrentUser(user);
+      setLoginError(null);
+      setNeedPassword(false);
       if (user.avatar) {
         localStorage.setItem('vm_avatar', user.avatar);
       }
       setUsers(allUsers);
+    });
+
+    // Регистрация не прошла (имя занято/пароль неверный)
+    socket.on('user:register_failed', ({ message, needPassword: np }: { message: string; needPassword?: boolean }) => {
+      setLoginError(message || 'Не удалось войти');
+      if (np) setNeedPassword(true);
+    });
+
+    // Этот ник открыли с другого устройства — разлогиниваем текущую сессию
+    socket.on('user:replaced', ({ message }: { message?: string }) => {
+      alert(message || 'Этот ник открыт в другом окне.');
+      localStorage.removeItem('vm_username');
+      setCurrentUser(null);
+      setSelectedUser(null);
     });
 
     socket.on('user:updated', (updatedUser: User) => {
@@ -136,21 +157,26 @@ export function App() {
     });
 
     socket.on('chat:receive', (message: ChatMessage) => {
-      const partnerId =
-        message.senderId === socket.id ? message.recipientId : message.senderId;
+      // FIX: определяем собеседника по имени (стабильно), а не по socket.id.
+      // Для своих (эхо) сообщений сервер присылает recipientName.
+      const isMine = message.senderId === socket.id;
+      const partnerName = isMine
+        ? (message.recipientName || '')
+        : message.senderName;
+      if (!partnerName) return;
 
       setConversations(prev => ({
         ...prev,
-        [partnerId]: [...(prev[partnerId] || []), message],
+        [partnerName]: [...(prev[partnerName] || []), message],
       }));
 
-      // Update unread count if message is from another user and not currently active chat
-      if (message.senderId !== socket.id) {
+      // Счётчик непрочитанных (по имени)
+      if (!isMine) {
         setSelectedUser(currSelected => {
-          if (!currSelected || currSelected.id !== message.senderId) {
+          if (!currSelected || currSelected.username !== partnerName) {
             setUnreadCounts(prevCounts => ({
               ...prevCounts,
-              [message.senderId]: (prevCounts[message.senderId] || 0) + 1,
+              [partnerName]: (prevCounts[partnerName] || 0) + 1,
             }));
           }
           return currSelected;
@@ -161,6 +187,7 @@ export function App() {
     socket.on(
       'chat:history_loaded',
       ({ recipientId, messages }: { recipientId: string; messages: ChatMessage[] }) => {
+        // Сервер теперь возвращает recipientId = имя собеседника
         setConversations(prev => ({
           ...prev,
           [recipientId]: messages,
@@ -189,12 +216,12 @@ export function App() {
     toggleMute,
   } = useWebRTC(socketRef.current, currentUser?.id || null);
 
-  // Handle Login
-  const handleLogin = (username: string) => {
+  // Handle Login (пароль опционален — защищает имя от угона)
+  const handleLogin = (username: string, password?: string) => {
     localStorage.setItem('vm_username', username);
     const savedAvatar = localStorage.getItem('vm_avatar') || undefined;
     if (socketRef.current) {
-      socketRef.current.emit('user:register', { username, avatar: savedAvatar });
+      socketRef.current.emit('user:register', { username, avatar: savedAvatar, password: password || undefined });
     }
   };
 
@@ -212,6 +239,8 @@ export function App() {
     localStorage.removeItem('vm_username');
     setCurrentUser(null);
     setSelectedUser(null);
+    setLoginError(null);
+    setNeedPassword(false);
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current.connect();
@@ -221,14 +250,14 @@ export function App() {
   // Handle User Selection
   const handleSelectUser = (user: User) => {
     setSelectedUser(user);
-    // Clear unread
+    // Clear unread (по имени)
     setUnreadCounts(prev => ({
       ...prev,
-      [user.id]: 0,
+      [user.username]: 0,
     }));
-    // Request chat history from server
+    // Request chat history from server (по стабильному имени)
     if (socketRef.current) {
-      socketRef.current.emit('chat:history', { recipientId: user.id });
+      socketRef.current.emit('chat:history', { recipientId: user.id, recipientUsername: user.username });
     }
   };
 
@@ -251,12 +280,19 @@ export function App() {
     startCall(user.id, user.username, user.avatar);
   };
 
-  const currentMessages = selectedUser ? conversations[selectedUser.id] || [] : [];
+  const currentMessages = selectedUser ? conversations[selectedUser.username] || [] : [];
 
   return (
     <div className="flex w-full h-full bg-gray-950 font-sans text-gray-100 overflow-hidden relative">
       {/* Show Login modal if user is not registered or logged in */}
-      {(!currentUser || !currentUser.id) && <LoginModal onLogin={handleLogin} />}
+      {(!currentUser || !currentUser.id) && (
+        <LoginModal
+          onLogin={handleLogin}
+          initialName={currentUser?.username || ''}
+          error={loginError}
+          needPassword={needPassword}
+        />
+      )}
 
       {/* Main Messenger Layout */}
       {currentUser && currentUser.id && (
@@ -270,6 +306,9 @@ export function App() {
             onStartCall={handleStartCall}
             onLogout={handleLogout}
             onOpenProfile={() => setIsProfileOpen(true)}
+            socketConnected={socketConnected}
+            updateInfo={updateInfo}
+            serverUrl={serverUrl}
           />
 
           <ChatArea
@@ -306,55 +345,6 @@ export function App() {
           />
         </>
       )}
-
-      {/* Connectivity & Update badges */}
-      <div className="fixed top-2.5 right-4 z-50 flex items-center gap-2">
-        {updateInfo?.available && (
-          <button
-            type="button"
-            onClick={() => {
-              alert(
-                `🚀 Доступно обновление v${updateInfo.latestVersion}!\n\nЧто нового:\n${
-                  updateInfo.releaseNotes || 'Улучшения стабильности и звонков'
-                }\n\nЧтобы обновить приложение, закройте его и запустите ярлык «Voice Launcher» на Рабочем столе (или в папке приложения).`
-              );
-            }}
-            title="Нажмите для подробностей об обновлении"
-            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold backdrop-blur-md bg-purple-500/20 text-purple-300 border border-purple-500/40 hover:bg-purple-500/30 transition-all cursor-pointer shadow-lg animate-pulse"
-          >
-            <span>🚀 Обновление v{updateInfo.latestVersion}!</span>
-          </button>
-        )}
-
-        <button
-          type="button"
-          onClick={() => {
-            const current = localStorage.getItem('vm_server_url') || serverUrl;
-            const next = prompt('Адрес сервера мессенджера (например, IP друга или облачный хостинг):', current);
-            if (next !== null) {
-              if (next.trim()) {
-                localStorage.setItem('vm_server_url', next.trim());
-              } else {
-                localStorage.removeItem('vm_server_url');
-              }
-              window.location.reload();
-            }
-          }}
-          title="Кликните, чтобы изменить адрес сервера"
-          className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium backdrop-blur-md cursor-pointer hover:scale-105 active:scale-95 transition-all shadow-sm ${
-            socketConnected
-              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20'
-              : 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20'
-          }`}
-        >
-          <span
-            className={`w-1.5 h-1.5 rounded-full ${
-              socketConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'
-            }`}
-          />
-          {socketConnected ? 'Сервер подключен' : 'Настроить сервер'}
-        </button>
-      </div>
     </div>
   );
 }

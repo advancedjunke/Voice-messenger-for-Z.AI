@@ -1,19 +1,37 @@
-import React, { useState } from 'react';
-import { PhoneCall, ShieldCheck, Sparkles } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { PhoneCall, ShieldCheck, Sparkles, Lock, AlertCircle } from 'lucide-react';
 
 interface LoginModalProps {
-  onLogin: (username: string) => void;
+  onLogin: (username: string, password?: string) => void;
+  initialName?: string;
+  error?: string | null;
+  needPassword?: boolean;
 }
 
-export const LoginModal: React.FC<LoginModalProps> = ({ onLogin }) => {
-  const [name, setName] = useState('');
+export const LoginModal: React.FC<LoginModalProps> = ({ onLogin, initialName = '', error, needPassword }) => {
+  const [name, setName] = useState(initialName);
+  const [password, setPassword] = useState('');
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  // Сбрасывать локальную ошибку при вводе
+  useEffect(() => {
+    setLocalError(null);
+  }, [name, password]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (name.trim()) {
-      onLogin(name.trim());
+    if (!name.trim()) return;
+
+    // Если сервер сказал, что имя защищено паролем — требуем пароль
+    if (needPassword && !password.trim()) {
+      setLocalError('Введите пароль для этого имени');
+      return;
     }
+
+    onLogin(name.trim(), password.trim() || undefined);
   };
+
+  const shownError = localError || error;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
@@ -49,6 +67,37 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onLogin }) => {
                 className="w-full px-4 py-3.5 bg-gray-950/70 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-base"
               />
             </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 text-left">
+                {needPassword ? 'Пароль (обязательно)' : 'Пароль (необязательно)'}
+              </label>
+              <div className="relative">
+                <Lock className={`absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 ${needPassword ? 'text-amber-400' : 'text-gray-500'}`} />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder={needPassword ? 'Это имя защищено паролем' : 'Придумайте пароль, чтобы защитить имя'}
+                  maxLength={64}
+                  className={`w-full pl-11 pr-4 py-3.5 bg-gray-950/70 border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-base ${
+                    needPassword ? 'border-amber-500/40' : 'border-gray-700'
+                  }`}
+                />
+              </div>
+              <p className="text-[11px] text-gray-500 mt-1.5 text-left">
+                {needPassword
+                  ? 'Это имя уже занято и защищено. Введите пароль владельца.'
+                  : 'Если зададите пароль — никто не сможет войти под вашим ником без него.'}
+              </p>
+            </div>
+
+            {shownError && (
+              <div className="flex items-start gap-2 px-4 py-3 bg-red-950/50 border border-red-500/30 rounded-xl text-sm text-red-300 text-left">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                <span>{shownError}</span>
+              </div>
+            )}
 
             <button
               type="submit"

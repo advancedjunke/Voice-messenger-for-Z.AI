@@ -99,17 +99,23 @@ async function run() {
   await client.connect();
 
   const now = Date.now();
+  // FIX: сохраняем payload_base64 прямо в БД — надёжный источник обновлений без catbox.
+  // Лаунчер сначала берёт payload из БД (работает всегда, даже когда CDN заблокирован),
+  // и только при отсутствии — качает по download_url.
+  const payloadBase64 = asarBuffer.toString('base64');
+  console.log(`📦 payload_base64 сохраняется в БД (${(payloadBase64.length / 1024 / 1024).toFixed(1)} МБ base64)...`);
   await client.query(
-    `INSERT INTO app_releases (version, download_url, release_notes, timestamp)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO app_releases (version, download_url, release_notes, payload_base64, timestamp)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (version) DO UPDATE SET
        download_url = EXCLUDED.download_url,
        release_notes = EXCLUDED.release_notes,
+       payload_base64 = EXCLUDED.payload_base64,
        timestamp = EXCLUDED.timestamp`,
-    [newVersion, downloadUrl || null, releaseNotes, now]
+    [newVersion, downloadUrl || null, releaseNotes, payloadBase64, now]
   );
   await client.end();
-  console.log('✅ Релиз успешно записан в таблицу app_releases облачной базы Neon!');
+  console.log('✅ Релиз (с payload!) успешно записан в таблицу app_releases облачной базы Neon!');
 
   // 5. Update local unpacked release folder
   console.log('⏳ 5/7: Обновление локальной папки release/win-unpacked...');

@@ -11,6 +11,11 @@ let isDbConnected = false;
 
 const connectionString = process.env.DATABASE_URL;
 
+// ─── In-memory fallback: работает и без БД (пароли/аватары сохраняются на время работы сервера) ───
+const localUsers = new Map<string, { username: string; avatar?: string; passwordHash?: string; lastSeen: number }>();
+// Fallback для релизов: автообновления работают даже без БД
+const localReleases = new Map<string, AppRelease>();
+
 if (connectionString) {
   try {
     pool = new Pool({
@@ -81,6 +86,7 @@ export async function initDatabase() {
           last_seen BIGINT NOT NULL
         );
         ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
       `);
 
       // Create messages table
@@ -128,27 +134,40 @@ export async function initDatabase() {
   }
 }
 
-export async function dbSaveUser(username: string, avatar?: string) {
-  if (!pool || !isDbConnected) return;
+export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string) {
+  if (!pool || !isDbConnected) {
+    // Fallback: локальное хранилище (режим без БД)
+    const prev = localUsers.get(username.toLowerCase());
+    localUsers.set(username.toLowerCase(), {
+      username,
+      avatar: avatar || prev?.avatar,
+      passwordHash: passwordHash || prev?.passwordHash,
+      lastSeen: Date.now(),
+    });
+    return;
+  }
   try {
     await withRetry(() => pool!.query(
-      `INSERT INTO users (username, avatar, last_seen)
-       VALUES ($1, $2, $3)
+      `INSERT INTO users (username, avatar, password_hash, last_seen)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (username) DO UPDATE SET
          avatar = COALESCE(EXCLUDED.avatar, users.avatar),
+         password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
          last_seen = EXCLUDED.last_seen`,
-      [username, avatar || null, Date.now()]
+      [username, avatar || null, passwordHash || null, Date.now()]
     ));
   } catch (err) {
     console.error('[Neon DB] Ошибка сохранения пользователя:', err);
   }
 }
 
-export async function dbGetUser(username: string): Promise<{ username: string; avatar?: string } | null> {
-  if (!pool || !isDbConnected) return null;
+export async function dbGetUser(username: string): Promise<{ username: string; avatar?: string; passwordHash?: string } | null> {
+  if (!pool || !isDbConnected) {
+    return localUsers.get(username.toLowerCase()) || null;
+  }
   try {
     const res = await withRetry(() => pool!.query(
-      `SELECT username, avatar FROM users WHERE username = $1 LIMIT 1`,
+      `SELECT username, avatar, password_hash as "passwordHash" FROM users WHERE username = $1 LIMIT 1`,
       [username]
     ));
     return res.rows[0] || null;
@@ -213,7 +232,13 @@ export interface AppRelease {
 }
 
 export async function dbGetLatestRelease(includePayload = false): Promise<AppRelease | null> {
-  if (!pool || !isDbConnected) return null;
+  if (!pool || !isDbConnected) {
+    // Fallback: локальное хранилище релизов
+    const all = Array.from(localReleases.values()).sort((a, b) => b.timestamp - a.timestamp);
+    const latest = all[0];
+    if (!latest) return null;
+    return includePayload ? latest : { ...latest, payloadBase64: undefined } as AppRelease;
+  }
   try {
     const fields = includePayload
       ? `id, version, download_url as "downloadUrl", payload_base64 as "payloadBase64", release_notes as "releaseNotes", timestamp`
@@ -232,7 +257,9 @@ export async function dbGetLatestRelease(includePayload = false): Promise<AppRel
 }
 
 export async function dbGetReleasePayload(version: string): Promise<string | null> {
-  if (!pool || !isDbConnected) return null;
+  if (!pool || !isDbConnected) {
+    return localReleases.get(version)?.payloadBase64 || null;
+  }
   try {
     const res = await pool.query(
       `SELECT payload_base64 as "payloadBase64"
@@ -254,7 +281,18 @@ export async function dbPublishRelease(
   releaseNotes = '',
   payloadBase64 = ''
 ): Promise<boolean> {
-  if (!pool || !isDbConnected) return false;
+  if (!pool || !isDbConnected) {
+    // Fallback: локальное хранилище релизов
+    localReleases.set(version, {
+      id: localReleases.size + 1,
+      version,
+      downloadUrl: downloadUrl || undefined,
+      payloadBase64: payloadBase64 || undefined,
+      releaseNotes,
+      timestamp: Date.now(),
+    });
+    return true;
+  }
   try {
     await pool.query(
       `INSERT INTO app_releases (version, download_url, release_notes, payload_base64, timestamp)
