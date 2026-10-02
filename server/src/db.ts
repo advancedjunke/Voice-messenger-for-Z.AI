@@ -101,7 +101,7 @@ if (connectionString) {
       connectionString,
       ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
       idleTimeoutMillis: 20000,
-      connectionTimeoutMillis: 10000,
+      connectionTimeoutMillis: 15000, // v1.0.20: Neon free tier может просыпаться до ~10 секунд
       max: 10,
     });
 
@@ -142,6 +142,74 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   }
   throw new Error('withRetry: exhausted retries');
 }
+
+// ────────────────────────────────────────────────────────────────
+// v1.0.20: ОЧЕРЕДЬ СООБЩЕНИЙ на время «пробуждения» базы.
+// Раньше сообщение, отправленное до подключения Neon (free tier
+// может просыпаться десятки секунд), ТЕРЯЛОСЬ МОЛЧА. Теперь оно
+// встаёт в очередь и автоматически доезжает до базы, как только
+// подключение установлено.
+// ────────────────────────────────────────────────────────────────
+const PENDING_MESSAGES_MAX = 1000;
+const pendingMessages: Array<{ msg: ChatMessage; conversationKey: string }> = [];
+
+function queuePendingMessage(item: { msg: ChatMessage; conversationKey: string }) {
+  if (pendingMessages.length >= PENDING_MESSAGES_MAX) pendingMessages.shift();
+  pendingMessages.push(item);
+  console.log(`📬 [Neon DB] Сообщение поставлено в очередь (всего: ${pendingMessages.length})`);
+}
+
+async function insertMessageRow(msg: ChatMessage, conversationKey: string) {
+  await withRetry(() => pool!.query(
+    `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp,
+                           reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted, forwarded_from)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      msg.id,
+      conversationKey,
+      msg.senderId,
+      msg.senderName,
+      msg.senderAvatar || null,
+      msg.recipientId,
+      msg.text || null,
+      msg.mediaUrl || null,
+      msg.mediaType || 'text',
+      msg.duration || null,
+      msg.timestamp,
+      msg.replyTo?.id || null,
+      msg.replyTo?.senderName || null,
+      msg.replyTo?.text || null,
+      msg.replyTo?.mediaType || null,
+      Boolean(msg.deleted),
+      msg.forwardedFrom || null,
+    ]
+  ));
+}
+
+export async function flushPendingMessages() {
+  if (!pool || !isDbConnected || pendingMessages.length === 0) return;
+  const batch = pendingMessages.splice(0, pendingMessages.length);
+  let saved = 0;
+  for (const item of batch) {
+    try {
+      await insertMessageRow(item.msg, item.conversationKey);
+      saved++;
+    } catch (err: any) {
+      console.warn('[Neon DB] Очередь: сообщение не сохранилось, возвращаю в конец очереди:', err?.message || err);
+      queuePendingMessage(item);
+      break; // база снова недоступна — продолжим на следующей попытке
+    }
+  }
+  if (saved > 0) console.log(`📬 [Neon DB] Из очереди сохранено сообщений: ${saved} (осталось: ${pendingMessages.length})`);
+}
+
+// Фоновая досылка: раз в 30 секунд пробуем сохранить недоставленное
+setInterval(() => {
+  if (isDbConnected && pendingMessages.length > 0) {
+    flushPendingMessages().catch(() => { /* не критично */ });
+  }
+}, 30000).unref?.();
 
 export async function initDatabase() {
   if (!pool) {
@@ -228,6 +296,9 @@ export async function initDatabase() {
         console.warn('[Neon DB] Не удалось перенести локальные аккаунты:', mErr.message);
       }
 
+      // v1.0.20: досылаем сообщения, накопившиеся, пока база просыпалась
+      await flushPendingMessages();
+
       return true;
     } finally {
       client.release();
@@ -258,11 +329,11 @@ export async function initDatabaseWithRetry(): Promise<boolean> {
     }
     if (await initDatabase()) return true;
   }
-  console.warn('[Neon DB] База недоступна — работаем в файловом режиме, подключение проверяем раз в минуту.');
+  console.warn('[Neon DB] База недоступна — работаем в файловом режиме, подключение проверяем раз в 15 секунд.');
   const timer = setInterval(() => {
     if (isDbConnected) { clearInterval(timer); return; }
     initDatabase().then(ok => { if (ok) { clearInterval(timer); console.log('✅ [Neon DB] База данных подключилась (после повторных попыток).'); } });
-  }, 60000);
+  }, 15000);
   timer.unref?.();
   return false;
 }
@@ -353,35 +424,17 @@ export async function dbGetUserByToken(token: string): Promise<{ username: strin
 }
 
 export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
-  if (!pool || !isDbConnected) return;
+  if (!pool) return; // БД не настроена — история только в памяти хоста
+  if (!isDbConnected) {
+    // v1.0.20: база настроена, но ещё не проснулась — НЕ ТЕРЯЕМ сообщение
+    queuePendingMessage({ msg, conversationKey });
+    return;
+  }
   try {
-    await withRetry(() => pool!.query(
-      `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp,
-                            reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted, forwarded_from)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        msg.id,
-        conversationKey,
-        msg.senderId,
-        msg.senderName,
-        msg.senderAvatar || null,
-        msg.recipientId,
-        msg.text || null,
-        msg.mediaUrl || null,
-        msg.mediaType || 'text',
-        msg.duration || null,
-        msg.timestamp,
-        msg.replyTo?.id || null,
-        msg.replyTo?.senderName || null,
-        msg.replyTo?.text || null,
-        msg.replyTo?.mediaType || null,
-        Boolean(msg.deleted),
-        msg.forwardedFrom || null,
-      ]
-    ));
-  } catch (err) {
-    console.error('[Neon DB] Ошибка сохранения сообщения:', err);
+    await insertMessageRow(msg, conversationKey);
+  } catch (err: any) {
+    console.error('[Neon DB] Ошибка сохранения сообщения:', err?.message || err);
+    queuePendingMessage({ msg, conversationKey }); // v1.0.20: не теряем
   }
 }
 

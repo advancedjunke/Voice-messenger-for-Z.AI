@@ -1,5 +1,6 @@
 node_modules/
 .env
+voice-messenger.env
 *.exe
 *.zip
 .system_generated/

@@ -48,7 +48,7 @@ function initFileLogging() {
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     logStream = fs.createWriteStream(p, { flags: 'a' });
-    logStream.write(`\n────── Запуск приложения v1.0.19 · ${new Date().toISOString()} ───────\n`);
+    logStream.write(`\n────── Запуск приложения v1.0.20 · ${new Date().toISOString()} ───────\n`);
     const wrap = (orig) => (...args) => {
       try { orig(...args); logStream.write(`[${new Date().toISOString()}] ${util.format(...args)}\n`); } catch { /* не критично */ }
     };
@@ -62,6 +62,12 @@ function initFileLogging() {
  * Мини-загрузчик .env: если рядом с приложением лежит voice-messenger.env
  * (или server/.env в исходниках), отдаём DATABASE_URL встроенному серверу —
  * тогда история чатов на хосте сохраняется и между перезапусками.
+ *
+ * v1.0.20: третьим кандидатом идёт voice-messenger.env, ВШИТЫЙ В СБОРКУ
+ * (GitHub Actions записывает его из секрета NEON_DATABASE_URL). Порядок
+ * приоритета: файл рядом с exe → файл из настроек приложения → вшитый
+ * в сборку → server/.env из исходников. Файл без полезных переменных
+ * (например, только комментарий) пропускается — смотрим следующий кандидат.
  */
 function loadOptionalEnvFile() {
   const candidates = [];
@@ -73,20 +79,27 @@ function loadOptionalEnvFile() {
   try {
     candidates.push(path.join(app.getPath('userData'), 'voice-messenger.env'));
   } catch { /* userData недоступен */ }
+  // v1.0.20: строка подключения, вшитая в сборку (секрет NEON_DATABASE_URL)
+  candidates.push(path.join(__dirname, '../voice-messenger.env'));
   candidates.push(path.join(__dirname, '../server/.env'));
 
   for (const file of candidates) {
     try {
       if (!fs.existsSync(file)) continue;
       const text = fs.readFileSync(file, 'utf8');
+      let applied = 0;
       for (const line of text.split(/\r?\n/)) {
         const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
         if (m && !process.env[m[1]]) {
           process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+          applied++;
         }
       }
-      console.log(`[Embedded] Загружен файл переменных: ${file}`);
-      return;
+      if (applied > 0) {
+        console.log(`[Embedded] Загружен файл переменных: ${file}`);
+        return;
+      }
+      // файл без полезных переменных — проверяем следующий кандидат
     } catch { /* не критично */ }
   }
 }
@@ -332,7 +345,7 @@ ipcMain.handle('vm:save-db-config', (_e, rawUrl) => {
 
 app.whenReady().then(async () => {
   initFileLogging();
-  console.log(`🚀 Voice Messenger v1.0.19 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
+  console.log(`🚀 Voice Messenger v1.0.20 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
   const serverTarget = await resolveServerTarget();
   createWindow(serverTarget);
 

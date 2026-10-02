@@ -401,6 +401,18 @@ io.on('connection', (socket: Socket) => {
     if (!otherName) return;
 
     const key = getConversationKey(sender.username, otherName);
+
+    // v1.0.20: если база настроена, но ещё «просыпается» (Neon free tier может
+    // подниматься десятки секунд), коротко подождём подключение — иначе
+    // пользователь увидит пустой чат, хотя история в базе уже есть.
+    const dbSt = getDbStatus();
+    if (dbSt.usingPostgres && !dbSt.connected) {
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        if (getDbStatus().connected) break;
+      }
+    }
+
     let history = messageHistory.get(key);
     if (!history || history.length === 0) {
       history = await dbGetHistory(key);
@@ -772,7 +784,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 server.listen(Number(PORT), '0.0.0.0', () => {
   const lanUrls = getLanAddresses();
-  console.log(`🚀 Voice Messenger Server v1.0.18 запущен`);
+  console.log(`🚀 Voice Messenger Server v1.0.20 запущен`);
   console.log(`   Локально:       http://localhost:${PORT}`);
   if (lanUrls.length > 0) {
     console.log(`   Для друзей (LAN):`);

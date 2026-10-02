@@ -39,6 +39,21 @@ jobs:
       - name: Remove server dev dependencies before packaging
         run: npm --prefix server prune --omit=dev
 
+      - name: Bake Neon DATABASE_URL into the package (repo secret NEON_DATABASE_URL)
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        shell: pwsh
+        run: |
+          $url = if ($env:NEON_DATABASE_URL) { $env:NEON_DATABASE_URL.Trim() } else { '' }
+          $enc = New-Object System.Text.UTF8Encoding($false) # UTF-8 без BOM
+          if ($url) {
+            [IO.File]::WriteAllText("$PWD/voice-messenger.env", "DATABASE_URL=$url`n", $enc)
+            Write-Host "Baked DATABASE_URL into voice-messenger.env (host: $(([Uri]$url).Host))"
+          } else {
+            [IO.File]::WriteAllText("$PWD/voice-messenger.env", "# DATABASE_URL is not configured (add repo secret NEON_DATABASE_URL)`n", $enc)
+            Write-Host "NEON_DATABASE_URL secret is not set - package ships without built-in database (users can add it in Settings)"
+          }
+
       - name: Build Windows executables (installer + portable)
         run: npx electron-builder --win nsis portable --publish never
         env:
