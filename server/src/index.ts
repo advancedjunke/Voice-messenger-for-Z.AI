@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import { User, ChatMessage, ReplyMeta, KnownUser } from './types.js';
-import { initDatabase, dbSaveUser, dbGetUser, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers } from './db.js';
+import { initDatabase, dbSaveUser, dbGetUser, dbFindUserByName, dbGetUserByToken, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers } from './db.js';
 import { startDiscoveryResponder } from './discovery.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -111,6 +111,99 @@ app.get('/api/server-info', (_req, res) => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────
+// v1.0.17: РЕАЛЬНАЯ РЕГИСТРАЦИЯ И ВХОД В АККАУНТ (REST).
+// Раньше вход был «по нику» через сокет и при недоступном сервере
+// кнопка молчала. Теперь: явная регистрация с паролем, вход,
+// токен сессии (localStorage) и живая проверка занятости имени.
+// ────────────────────────────────────────────────────────────────
+
+const NAME_RE = /^[a-zA-Zа-яА-ЯёЁ0-9_\- ]{2,24}$/u;
+
+function validateUsername(name: string): string | null {
+  const clean = (name || '').trim();
+  if (clean.length < 2) return 'Имя должно содержать минимум 2 символа';
+  if (clean.length > 24) return 'Имя не должно быть длиннее 24 символов';
+  if (!NAME_RE.test(clean)) return 'Имя может содержать только буквы, цифры, пробел, «_» и «-»';
+  return null;
+}
+
+function validatePassword(password: string): string | null {
+  if (!password || password.length < 4) return 'Пароль должен содержать минимум 4 символа';
+  if (password.length > 64) return 'Пароль не должен быть длиннее 64 символов';
+  return null;
+}
+
+function newSessionToken(): string {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    const nameError = validateUsername(username);
+    if (nameError) return res.status(400).json({ error: nameError });
+    const passError = validatePassword(password);
+    if (passError) return res.status(400).json({ error: passError });
+
+    const existing = await dbFindUserByName(String(username).trim());
+    if (existing) {
+      return res.status(409).json({ error: 'Имя «' + existing.username + '» уже занято. Попробуйте войти на вкладке «Вход».' });
+    }
+
+    const cleanName = String(username).trim();
+    const token = newSessionToken();
+    await dbSaveUser(cleanName, undefined, hashPassword(password), token);
+    console.log(`[Auth] Зарегистрирован аккаунт: ${cleanName}`);
+    res.json({ ok: true, token, username: cleanName, avatar: null });
+  } catch (err: any) {
+    console.error('[Auth] Ошибка регистрации:', err?.message || err);
+    res.status(500).json({ error: 'Ошибка сервера при регистрации. Попробуйте ещё раз.' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Введите имя и пароль' });
+    }
+    const account = await dbFindUserByName(String(username).trim());
+    if (!account || !account.passwordHash) {
+      return res.status(404).json({ error: 'Аккаунт не найден. Создайте его на вкладке «Регистрация».' });
+    }
+    if (!verifyPassword(password, account.passwordHash)) {
+      return res.status(401).json({ error: 'Неверный пароль. Попробуйте ещё раз.' });
+    }
+    const token = newSessionToken();
+    await dbSaveUser(account.username, account.avatar, undefined, token);
+    console.log(`[Auth] Вход в аккаунт: ${account.username}`);
+    res.json({ ok: true, token, username: account.username, avatar: account.avatar || null });
+  } catch (err: any) {
+    console.error('[Auth] Ошибка входа:', err?.message || err);
+    res.status(500).json({ error: 'Ошибка сервера при входе. Попробуйте ещё раз.' });
+  }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const account = await dbGetUserByToken(token);
+  if (!account) {
+    return res.status(401).json({ error: 'Сессия недействительна' });
+  }
+  res.json({ ok: true, username: account.username, avatar: account.avatar || null });
+});
+
+app.get('/api/auth/check', async (req, res) => {
+  const username = String(req.query.username || '').trim();
+  const nameError = validateUsername(username);
+  if (nameError) {
+    return res.json({ taken: false, valid: false, reason: nameError });
+  }
+  const existing = await dbFindUserByName(username);
+  res.json({ taken: Boolean(existing), valid: true, takenBy: existing?.username });
+});
+
 // Auto-updater endpoints
 app.get('/api/updates/check', async (_req, res) => {
   try {
@@ -189,35 +282,51 @@ io.on('connection', (socket: Socket) => {
   console.log(`[Socket Connected] ID: ${socket.id}`);
 
   // 1. User Registration
-  socket.on('user:register', async ({ username, avatar, password }: { username: string; avatar?: string; password?: string }) => {
-    const cleanName = (username || '').trim().slice(0, 24) || `User_${socket.id.slice(0, 4)}`;
-
-    // ─── Optional password protection: if the name is taken in DB and protected, require the password ───
-    const existingDbUser = await dbGetUser(cleanName);
-    if (existingDbUser?.passwordHash) {
-      if (!password) {
-        socket.emit('user:register_failed', {
-          message: `Имя «${cleanName}» защищено паролем. Введите пароль, чтобы войти.`,
-          needPassword: true,
-        });
-        return;
-      }
-      if (!verifyPassword(password, existingDbUser.passwordHash)) {
-        socket.emit('user:register_failed', {
-          message: 'Неверный пароль для этого имени.',
-          needPassword: true,
-        });
-        return;
-      }
-    }
-
+  // v1.0.17: поддержан вход по токену аккаунта (после REST-регистрации/логина).
+  // Без токена работает прежний путь (ник + опциональный пароль) — совместимость.
+  socket.on('user:register', async ({ username, avatar, password, token }: { username: string; avatar?: string; password?: string; token?: string }) => {
+    let cleanName = (username || '').trim().slice(0, 24);
     let userAvatar = avatar;
-    if (!userAvatar && existingDbUser?.avatar) {
-      userAvatar = existingDbUser.avatar;
+
+    if (token) {
+      // ─── Вход по токену: имя берётся ИЗ АККАУНТА, пароль не нужен ───
+      const account = await dbGetUserByToken(token);
+      if (!account) {
+        socket.emit('user:register_failed', {
+          message: 'Сессия недействительна (сервер мог быть перезапущен). Войдите заново.',
+        });
+        return;
+      }
+      cleanName = account.username;
+      if (!userAvatar && account.avatar) userAvatar = account.avatar;
+    } else {
+      // ─── Legacy: если имя занято в БД и защищено паролем — требуем пароль ───
+      const existingDbUser = await dbGetUser(cleanName);
+      if (existingDbUser?.passwordHash) {
+        if (!password) {
+          socket.emit('user:register_failed', {
+            message: `Имя «${cleanName}» защищено паролем. Введите пароль, чтобы войти.`,
+            needPassword: true,
+          });
+          return;
+        }
+        if (!verifyPassword(password, existingDbUser.passwordHash)) {
+          socket.emit('user:register_failed', {
+            message: 'Неверный пароль для этого имени.',
+            needPassword: true,
+          });
+          return;
+        }
+      }
+      if (!userAvatar && existingDbUser?.avatar) {
+        userAvatar = existingDbUser.avatar;
+      }
     }
+
+    if (!cleanName) cleanName = `User_${socket.id.slice(0, 4)}`;
     // Сохраняем пользователя всегда — так last_seen обновляется при каждом входе,
     // и пользователь попадает в список «известных» (сайдбар с офлайн-собеседниками)
-    await dbSaveUser(cleanName, userAvatar, password ? hashPassword(password) : undefined);
+    await dbSaveUser(cleanName, userAvatar, password ? hashPassword(password) : undefined, token);
 
     // ─── Fix: same name opened twice (second tab / reconnect) — replace the old session ───
     for (const [sId, u] of usersBySocketId.entries()) {
@@ -658,7 +767,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 server.listen(Number(PORT), '0.0.0.0', () => {
   const lanUrls = getLanAddresses();
-  console.log(`🚀 Voice Messenger Server v1.0.16 запущен`);
+  console.log(`🚀 Voice Messenger Server v1.0.17 запущен`);
   console.log(`   Локально:       http://localhost:${PORT}`);
   if (lanUrls.length > 0) {
     console.log(`   Для друзей (LAN):`);

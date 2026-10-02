@@ -1,5 +1,8 @@
 import pg from 'pg';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { ChatMessage, KnownUser, User } from './types.js';
 
 dotenv.config();
@@ -11,10 +14,61 @@ let isDbConnected = false;
 
 const connectionString = process.env.DATABASE_URL;
 
-// ─── In-memory fallback: работает и без БД (пароли/аватары сохраняются на время работы сервера) ───
-const localUsers = new Map<string, { username: string; avatar?: string; passwordHash?: string; lastSeen: number }>();
+// ─── In-memory fallback: работает и без БД ───
+const localUsers = new Map<string, { username: string; avatar?: string; passwordHash?: string; authToken?: string; lastSeen: number }>();
 // Fallback для релизов: автообновления работают даже без БД
 const localReleases = new Map<string, AppRelease>();
+
+// ────────────────────────────────────────────────────────────────
+// v1.0.17: ФАЙЛОВОЕ ХРАНИЛИЩЕ АККАУНТОВ (режим без БД).
+// Раньше аккаунты жили только в памяти — перезапуск сервера стирал
+// регистрации. Теперь они сохраняются в accounts.json и переживают
+// перезапуск приложения/сервера. В Electron путь задаётся через
+// VM_DATA_DIR (userData), в батнике — server/data рядом с сервером.
+// ────────────────────────────────────────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirnameDb = path.dirname(__filename);
+const DATA_DIR = process.env.VM_DATA_DIR || path.resolve(__dirnameDb, '../data');
+const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+
+function loadLocalUsers() {
+  try {
+    if (!fs.existsSync(ACCOUNTS_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
+    if (Array.isArray(raw?.users)) {
+      for (const u of raw.users) {
+        if (!u?.username) continue;
+        localUsers.set(String(u.username).toLowerCase(), {
+          username: String(u.username),
+          avatar: u.avatar || undefined,
+          passwordHash: u.passwordHash || undefined,
+          authToken: u.authToken || undefined,
+          lastSeen: Number(u.lastSeen) || 0,
+        });
+      }
+      console.log(`📂 [Accounts] Загружено локальных аккаунтов: ${localUsers.size} (${ACCOUNTS_FILE})`);
+    }
+  } catch (err: any) {
+    console.warn('[Accounts] Не удалось прочитать accounts.json:', err?.message || err);
+  }
+}
+loadLocalUsers();
+
+let accountsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+function persistLocalUsers() {
+  if (accountsSaveTimer) clearTimeout(accountsSaveTimer);
+  accountsSaveTimer = setTimeout(() => {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      const data = { savedAt: Date.now(), users: Array.from(localUsers.values()) };
+      const tmp = ACCOUNTS_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tmp, ACCOUNTS_FILE);
+    } catch (err: any) {
+      console.warn('[Accounts] Не удалось сохранить accounts.json:', err?.message || err);
+    }
+  }, 400);
+}
 
 if (connectionString) {
   try {
@@ -87,6 +141,8 @@ export async function initDatabase() {
         );
         ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
         ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+        -- v1.0.17: токен сессии для входа в аккаунт
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_token TEXT;
       `);
 
       // Create messages table
@@ -142,27 +198,30 @@ export async function initDatabase() {
   }
 }
 
-export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string) {
+export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string, authToken?: string) {
   if (!pool || !isDbConnected) {
-    // Fallback: локальное хранилище (режим без БД)
+    // Fallback: локальное файловое хранилище (режим без БД)
     const prev = localUsers.get(username.toLowerCase());
     localUsers.set(username.toLowerCase(), {
       username,
       avatar: avatar || prev?.avatar,
       passwordHash: passwordHash || prev?.passwordHash,
+      authToken: authToken || prev?.authToken,
       lastSeen: Date.now(),
     });
+    persistLocalUsers();
     return;
   }
   try {
     await withRetry(() => pool!.query(
-      `INSERT INTO users (username, avatar, password_hash, last_seen)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO users (username, avatar, password_hash, auth_token, last_seen)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (username) DO UPDATE SET
          avatar = COALESCE(EXCLUDED.avatar, users.avatar),
          password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
+         auth_token = COALESCE(EXCLUDED.auth_token, users.auth_token),
          last_seen = EXCLUDED.last_seen`,
-      [username, avatar || null, passwordHash || null, Date.now()]
+      [username, avatar || null, passwordHash || null, authToken || null, Date.now()]
     ));
   } catch (err) {
     console.error('[Neon DB] Ошибка сохранения пользователя:', err);
@@ -181,6 +240,45 @@ export async function dbGetUser(username: string): Promise<{ username: string; a
     return res.rows[0] || null;
   } catch (err) {
     console.error('[Neon DB] Ошибка получения пользователя:', err);
+    return null;
+  }
+}
+
+// v1.0.17: поиск аккаунта без учёта регистра (Alice и alice — один аккаунт)
+export async function dbFindUserByName(name: string): Promise<{ username: string; avatar?: string; passwordHash?: string } | null> {
+  if (!name) return null;
+  if (!pool || !isDbConnected) {
+    return localUsers.get(name.toLowerCase()) || null;
+  }
+  try {
+    const res = await withRetry(() => pool!.query(
+      `SELECT username, avatar, password_hash as "passwordHash" FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1`,
+      [name]
+    ));
+    return res.rows[0] || null;
+  } catch (err) {
+    console.error('[Neon DB] Ошибка поиска пользователя:', err);
+    return null;
+  }
+}
+
+// v1.0.17: найти аккаунт по токену сессии
+export async function dbGetUserByToken(token: string): Promise<{ username: string; avatar?: string } | null> {
+  if (!token) return null;
+  if (!pool || !isDbConnected) {
+    for (const u of localUsers.values()) {
+      if (u.authToken === token) return { username: u.username, avatar: u.avatar };
+    }
+    return null;
+  }
+  try {
+    const res = await withRetry(() => pool!.query(
+      `SELECT username, avatar FROM users WHERE auth_token = $1 LIMIT 1`,
+      [token]
+    ));
+    return res.rows[0] || null;
+  } catch (err) {
+    console.error('[Neon DB] Ошибка поиска по токену:', err);
     return null;
   }
 }
@@ -238,6 +336,7 @@ export async function dbSetLastSeen(username: string) {
   if (!pool || !isDbConnected) {
     const prev = localUsers.get(username.toLowerCase());
     if (prev) prev.lastSeen = Date.now();
+    persistLocalUsers();
     return;
   }
   try {

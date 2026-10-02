@@ -82,6 +82,16 @@ async function startEmbeddedServer() {
   }
 
   loadOptionalEnvFile();
+
+  // v1.0.17: папка данных встроенного сервера — аккаунты (логины/пароли/токены)
+  // переживают перезапуск приложения. В Program Files писать нельзя, поэтому
+  // используем стандартную папку данных Electron (%APPDATA%/VoiceMessenger).
+  try {
+    const dataDir = path.join(app.getPath('userData'), 'server-data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    process.env.VM_DATA_DIR = dataDir;
+  } catch { /* не критично — сервер сохранит в свою папку data */ }
+
   process.env.VM_EMBEDDED = '1'; // сервер не должен process.exit() при ошибке порта
 
   try {

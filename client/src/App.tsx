@@ -7,7 +7,7 @@ import { audioTone } from './utils/audioTone.js';
 import { isNewerVersion } from './utils/format.js';
 import { Sidebar } from './components/Sidebar.js';
 import { ChatArea } from './components/ChatArea.js';
-import { LoginModal } from './components/LoginModal.js';
+import { AuthScreen } from './components/AuthScreen.js';
 import { CallModal } from './components/CallModal.js';
 import { UserProfileModal } from './components/UserProfileModal.js';
 import { ForwardModal } from './components/ForwardModal.js';
@@ -74,7 +74,7 @@ function showDesktopNotification(senderName: string, message: ChatMessage) {
 }
 
 export function App() {
-  const APP_VERSION = '1.0.16'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.17'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');
@@ -91,7 +91,6 @@ export function App() {
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [needPassword, setNeedPassword] = useState(false);
 
   // v1.0.10: индикаторы «печатает…» (username → таймстамп последнего события)
   const [typingUsers, setTypingUsers] = useState<Record<string, number>>({});
@@ -158,11 +157,13 @@ export function App() {
       console.log('Connected to server with ID:', socket.id);
       setSocketConnected(true);
 
-      // Re-register user if username exists
+      // v1.0.17: вход в аккаунт — имя + токен сессии (REST-авторизация).
+      // Если аккаунта/токена нет — просто открывается экран входа.
       const savedName = localStorage.getItem('vm_username');
       const savedAvatar = localStorage.getItem('vm_avatar') || undefined;
+      const savedToken = localStorage.getItem('vm_token') || undefined;
       if (savedName) {
-        socket.emit('user:register', { username: savedName, avatar: savedAvatar });
+        socket.emit('user:register', { username: savedName, avatar: savedAvatar, token: savedToken });
       }
     });
 
@@ -174,7 +175,6 @@ export function App() {
     socket.on('user:registered', ({ user, allUsers }: { user: User; allUsers: User[] }) => {
       setCurrentUser(user);
       setLoginError(null);
-      setNeedPassword(false);
       if (user.avatar) {
         localStorage.setItem('vm_avatar', user.avatar);
       }
@@ -189,10 +189,9 @@ export function App() {
       } catch { /* не критично */ }
     });
 
-    // Регистрация не прошла (имя занято/пароль неверный)
-    socket.on('user:register_failed', ({ message, needPassword: np }: { message: string; needPassword?: boolean }) => {
+    // Регистрация/вход не прошли (имя занято, неверный пароль, токен истёк)
+    socket.on('user:register_failed', ({ message }: { message: string; needPassword?: boolean }) => {
       setLoginError(message || 'Не удалось войти');
-      if (np) setNeedPassword(true);
     });
 
     // Этот ник открыли с другого устройства — разлогиниваем текущую сессию
@@ -401,13 +400,26 @@ export function App() {
     toggleMute,
   } = useWebRTC(socketRef.current, currentUser?.id || null);
 
-  // Handle Login (пароль опционален — защищает имя от угона)
-  const handleLogin = (username: string, password?: string) => {
-    localStorage.setItem('vm_username', username);
-    const savedAvatar = localStorage.getItem('vm_avatar') || undefined;
-    if (socketRef.current) {
-      socketRef.current.emit('user:register', { username, avatar: savedAvatar, password: password || undefined });
+  // v1.0.17: успешная регистрация или вход через REST — сохраняем токен сессии
+  // и регистрируемся в сокете. Если сокет ещё не подключился, регистрация уйдёт
+  // из обработчика on('connect') — кнопка больше не может «молчать».
+  const handleAuthed = (payload: { token: string; username: string; avatar?: string | null }) => {
+    localStorage.setItem('vm_token', payload.token);
+    localStorage.setItem('vm_username', payload.username);
+    if (payload.avatar) {
+      localStorage.setItem('vm_avatar', payload.avatar);
     }
+    setLoginError(null);
+    const avatar = payload.avatar || localStorage.getItem('vm_avatar') || undefined;
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('user:register', {
+        username: payload.username,
+        avatar,
+        token: payload.token,
+      });
+    }
+    // оптимистично показываем имя, чтобы экран входа не мигал
+    setCurrentUser(prev => prev && prev.id ? prev : { id: '', socketId: '', username: payload.username, avatar, online: false });
   };
 
   // Handle Save Avatar
@@ -422,10 +434,10 @@ export function App() {
   // Handle Logout
   const handleLogout = () => {
     localStorage.removeItem('vm_username');
+    localStorage.removeItem('vm_token');
     setCurrentUser(null);
     setSelectedUser(null);
     setLoginError(null);
-    setNeedPassword(false);
     if (socketRef.current) {
       socketRef.current.disconnect();
       socketRef.current.connect();
@@ -498,13 +510,14 @@ export function App() {
 
   return (
     <div className="flex w-full h-full bg-gray-950 font-sans text-gray-100 overflow-hidden relative">
-      {/* Show Login modal if user is not registered or logged in */}
+      {/* v1.0.17: экран входа/регистрации (вместо старого LoginModal) */}
       {(!currentUser || !currentUser.id) && (
-        <LoginModal
-          onLogin={handleLogin}
+        <AuthScreen
+          serverUrl={serverUrl}
+          socketConnected={socketConnected}
           initialName={currentUser?.username || ''}
           error={loginError}
-          needPassword={needPassword}
+          onAuthed={handleAuthed}
         />
       )}
 
