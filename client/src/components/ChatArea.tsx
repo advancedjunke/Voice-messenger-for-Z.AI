@@ -1,8 +1,9 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import type { User, ChatMessage, ActiveCall, MessageType, ReplyMeta } from '../types.js';
 import {
   Send, Phone, MessageSquare, Shield, Image as ImageIcon, Mic, X, Smile,
   Check, CheckCheck, CornerUpLeft, Trash2, Search, Ban, ChevronUp, ChevronDown,
+  Forward, Copy, ArrowDownToLine,
 } from 'lucide-react';
 import { AudioMessagePlayer } from './AudioMessagePlayer.js';
 import { VoiceRecorder } from './VoiceRecorder.js';
@@ -25,6 +26,8 @@ interface ChatAreaProps {
   onStartCall: (user: User) => void;
   /** v1.0.11: удалить своё сообщение */
   onDeleteMessage?: (messageId: string) => void;
+  /** v1.0.12: переслать сообщение другому контакту */
+  onRequestForward?: (message: ChatMessage) => void;
   isPartnerTyping?: boolean;
   onTyping?: (recipientId: string, isTyping: boolean) => void;
 }
@@ -59,6 +62,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSendMessage,
   onStartCall,
   onDeleteMessage,
+  onRequestForward,
   isPartnerTyping = false,
   onTyping,
 }) => {
@@ -82,14 +86,74 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const lastTypingSentRef = useRef(0);
   // v1.0.11: refs сообщений для перехода к найденному/цитируемому
   const messageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  // v1.0.12: контейнер ленты + состояние «пользователь прокрутил вверх»
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const isNearBottomRef = useRef(true);
+  const lastSeenCountRef = useRef(0); // messages.length, когда пользователь был у низа
+  const messagesLenRef = useRef(0); // актуальная длина ленты для handleScroll
+  messagesLenRef.current = messages.length;
+  const [showScrollDown, setShowScrollDown] = useState(false);
+  const [newBelowCount, setNewBelowCount] = useState(0);
+  // v1.0.12: копирование текста сообщения
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const near = distance < 120;
+    isNearBottomRef.current = near;
+    setShowScrollDown(!near);
+    if (near) {
+      // досмотрели до конца — все сообщения «увидены»
+      lastSeenCountRef.current = messagesLenRef.current;
+      setNewBelowCount(0);
+    }
+  }, []);
+
+  // v1.0.12: автоскролл только когда пользователь у низа; иначе — счётчик на кнопке.
+  // Счётчик считается ДЕЛЬТОЙ длины ленты (устойчиво к батчингу нескольких
+  // сообщений в одном рендере — раньше инкремент терял часть сообщений).
+  useEffect(() => {
+    if (isNearBottomRef.current) {
+      scrollToBottom();
+      lastSeenCountRef.current = messages.length;
+      setNewBelowCount(0);
+    } else {
+      setNewBelowCount(Math.max(0, messages.length - lastSeenCountRef.current));
+    }
+  }, [messages, isRecordingVoice, scrollToBottom]);
+
+  const handleScrollDownClick = () => {
+    lastSeenCountRef.current = messages.length;
+    setNewBelowCount(0);
+    scrollToBottom();
   };
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, isRecordingVoice]);
+  // v1.0.12: копировать текст сообщения в буфер обмена
+  const handleCopyMessage = async (msg: ChatMessage) => {
+    const text = (msg.text || '').trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // fallback для старых браузеров/без HTTPS
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* игнорируем */ }
+      document.body.removeChild(ta);
+    }
+    setCopiedId(msg.id);
+    window.setTimeout(() => setCopiedId(prev => (prev === msg.id ? null : prev)), 1500);
+  };
 
   // v1.0.11: id сообщений, совпадающих с поиском
   const matchIds = useMemo(() => {
@@ -412,7 +476,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Messages Stream */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-6"
+      >
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-6 max-w-sm mx-auto my-auto animate-in fade-in duration-300">
             <div className="relative mb-3">
@@ -519,25 +587,53 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       </div>
                     )}
 
-                    {/* v1.0.11: hover-действия — ответить / удалить */}
+                    {/* v1.0.12: hover-действия — ответить / копировать / переслать / удалить */}
                     {!msg.deleted && (
                       <div
-                        className={`absolute -top-1 ${isMe ? '-left-11' : '-right-11'} hidden sm:flex flex-col gap-1 opacity-0 translate-y-1 group-hover/msg:opacity-100 group-hover/msg:translate-y-0 transition-all duration-150`}
+                        className={`absolute -top-2 z-10 ${isMe ? '-left-32' : '-right-32'} hidden sm:flex flex-row gap-1 opacity-0 translate-y-1 group-hover/msg:opacity-100 group-hover/msg:translate-y-0 transition-all duration-150`}
                       >
                         <button
                           type="button"
                           onClick={() => setReplyTo(msg)}
                           title="Ответить"
-                          className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-indigo-300 hover:border-indigo-500/50 transition-colors"
+                          className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-indigo-300 hover:border-indigo-500/50 transition-colors shadow-lg"
                         >
                           <CornerUpLeft className="w-3.5 h-3.5" />
                         </button>
+                        {msg.text && (
+                          <button
+                            type="button"
+                            onClick={() => handleCopyMessage(msg)}
+                            title={copiedId === msg.id ? 'Скопировано!' : 'Копировать текст'}
+                            className={`p-1.5 rounded-lg bg-gray-800/90 border transition-colors shadow-lg ${
+                              copiedId === msg.id
+                                ? 'border-emerald-500/60 text-emerald-400'
+                                : 'border-gray-700 text-gray-300 hover:text-emerald-300 hover:border-emerald-500/50'
+                            }`}
+                          >
+                            {copiedId === msg.id ? (
+                              <Check className="w-3.5 h-3.5 animate-pop-badge" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
+                        {onRequestForward && (
+                          <button
+                            type="button"
+                            onClick={() => onRequestForward(msg)}
+                            title="Переслать сообщение"
+                            className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-indigo-300 hover:border-indigo-500/50 transition-colors shadow-lg"
+                          >
+                            <Forward className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                         {isMe && onDeleteMessage && (
                           <button
                             type="button"
                             onClick={() => onDeleteMessage(msg.id)}
                             title="Удалить сообщение"
-                            className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-red-400 hover:border-red-500/50 transition-colors"
+                            className="p-1.5 rounded-lg bg-gray-800/90 border border-gray-700 text-gray-300 hover:text-red-400 hover:border-red-500/50 transition-colors shadow-lg"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -580,6 +676,19 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                             : 'bg-gray-900 border border-gray-800 text-gray-200 ' + (isGrouped ? 'rounded-tl-xl' : 'rounded-tl-none')
                         }`}
                       >
+                        {/* v1.0.12: метка пересланного сообщения */}
+                        {msg.forwardedFrom && (
+                          <div className="flex items-center gap-1.5 mb-1.5 text-[11px] italic text-indigo-200/80">
+                            <Forward className="w-3 h-3 shrink-0" />
+                            <span>
+                              Переслано от{' '}
+                              <span className="font-semibold not-italic">
+                                {msg.forwardedFrom === currentUser.username ? 'вас' : msg.forwardedFrom}
+                              </span>
+                            </span>
+                          </div>
+                        )}
+
                         {/* v1.0.11: цитата ответа */}
                         {msg.replyTo && (
                           <div
@@ -657,6 +766,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* v1.0.12: плавающая кнопка «вниз» + счётчик новых сообщений */}
+      {showScrollDown && (
+        <button
+          type="button"
+          onClick={handleScrollDownClick}
+          title={newBelowCount > 0 ? `Новых сообщений: ${newBelowCount}` : 'Прокрутить вниз'}
+          aria-label="Прокрутить вниз"
+          className="absolute bottom-28 right-6 z-20 flex items-center gap-2 pl-3 pr-4 py-2.5 rounded-2xl bg-gray-900/95 border border-gray-700 shadow-2xl shadow-black/40 hover:border-indigo-500/60 hover:bg-gray-800/95 transition-all scroll-btn-in cursor-pointer"
+        >
+          <span className="relative">
+            <ArrowDownToLine className="w-5 h-5 text-indigo-300" />
+            {newBelowCount > 0 && (
+              <span className="absolute -top-2 -right-2.5 px-1.5 min-w-[18px] h-[18px] flex items-center justify-center bg-indigo-600 text-white text-[10px] font-bold rounded-full animate-pop-badge">
+                {newBelowCount > 99 ? '99+' : newBelowCount}
+              </span>
+            )}
+          </span>
+          <span className="text-xs font-medium text-gray-300">
+            {newBelowCount > 0 ? `${newBelowCount} новых` : 'Вниз'}
+          </span>
+        </button>
+      )}
 
       {/* v1.0.11: панель ответа на сообщение */}
       {replyTo && (

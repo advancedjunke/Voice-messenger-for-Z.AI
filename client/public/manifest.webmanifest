@@ -1,0 +1,24 @@
+{
+  "name": "Voice Messenger",
+  "short_name": "VoiceChat",
+  "description": "Личные сообщения, голосовые, фото и прямые WebRTC аудиозвонки",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0518",
+  "theme_color": "#0f0518",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

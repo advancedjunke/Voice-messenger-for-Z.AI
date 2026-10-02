@@ -111,6 +111,8 @@ export async function initDatabase() {
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_text TEXT;
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_media_type VARCHAR(50);
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE;
+        -- v1.0.12: пересылка сообщений (имя первоначального отправителя)
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from VARCHAR(100);
         CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_key);
       `);
 
@@ -188,8 +190,8 @@ export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
   try {
     await withRetry(() => pool!.query(
       `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp,
-                            reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                            reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted, forwarded_from)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (id) DO NOTHING`,
       [
         msg.id,
@@ -208,6 +210,7 @@ export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
         msg.replyTo?.text || null,
         msg.replyTo?.mediaType || null,
         Boolean(msg.deleted),
+        msg.forwardedFrom || null,
       ]
     ));
   } catch (err) {
@@ -277,7 +280,7 @@ export async function dbGetHistory(conversationKey: string, limit = 200): Promis
       `SELECT id, sender_id as "senderId", sender_name as "senderName", sender_avatar as "senderAvatar", recipient_id as "recipientId",
               text, media_url as "mediaUrl", media_type as "mediaType", duration, timestamp,
               reply_to_id as "replyToId", reply_to_sender as "replyToSender", reply_to_text as "replyToText",
-              reply_to_media_type as "replyToMediaType", deleted
+              reply_to_media_type as "replyToMediaType", deleted, forwarded_from as "forwardedFrom"
        FROM messages
        WHERE conversation_key = $1
        ORDER BY timestamp ASC

@@ -235,6 +235,8 @@ io.on('connection', (socket: Socket) => {
     try {
       const known = await dbGetKnownUsers(30);
       socket.emit('users:known_list', { users: known });
+      // v1.0.12: бродкаст всем — у остальных в сайдбаре сразу появится новый контакт
+      socket.broadcast.emit('users:known_list', { users: known });
     } catch { /* не критично */ }
   });
 
@@ -287,6 +289,7 @@ io.on('connection', (socket: Socket) => {
       mediaType,
       duration,
       replyTo,
+      forwardedFrom,
     }: {
       recipientId?: string;
       recipientUsername?: string;
@@ -295,6 +298,8 @@ io.on('connection', (socket: Socket) => {
       mediaType?: 'text' | 'image' | 'voice';
       duration?: number;
       replyTo?: ReplyMeta;
+      // v1.0.12: имя первоначального отправителя при пересылке
+      forwardedFrom?: string;
     }) => {
       const sender = usersBySocketId.get(socket.id);
       if (!sender) return;
@@ -327,6 +332,9 @@ io.on('connection', (socket: Socket) => {
         };
       }
 
+      // v1.0.12: пересланные сообщения не сохраняют исходный replyTo (это новая ветка)
+      const cleanForwardedFrom = (forwardedFrom || '').trim().slice(0, 24) || undefined;
+
       const message: ChatMessage = {
         id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         senderId: sender.id,
@@ -339,7 +347,8 @@ io.on('connection', (socket: Socket) => {
         mediaType: mediaType || 'text',
         duration: duration || undefined,
         read: false,
-        replyTo: replyMeta,
+        replyTo: cleanForwardedFrom ? undefined : replyMeta,
+        forwardedFrom: cleanForwardedFrom,
         timestamp: Date.now(),
       };
 

@@ -32,6 +32,8 @@ export interface ChatMessage {
   read?: boolean;
   replyTo?: ReplyMeta;
   deleted?: boolean;
+  // v1.0.12: имя первоначального отправителя (если сообщение переслано)
+  forwardedFrom?: string;
   timestamp: number;
 }
 

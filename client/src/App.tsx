@@ -10,6 +10,7 @@ import { ChatArea } from './components/ChatArea.js';
 import { LoginModal } from './components/LoginModal.js';
 import { CallModal } from './components/CallModal.js';
 import { UserProfileModal } from './components/UserProfileModal.js';
+import { ForwardModal } from './components/ForwardModal.js';
 
 const CLOUD_SERVER_URL = 'https://f2f9c29f9c574a2c-217-199-233-97.serveousercontent.com';
 
@@ -37,8 +38,36 @@ function getEffectiveServerUrl(): string {
   return CLOUD_SERVER_URL;
 }
 
+// v1.0.12: системные desktop-уведомления о новых сообщениях (когда вкладка не в фокусе)
+function showDesktopNotification(senderName: string, message: ChatMessage) {
+  try {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    if (document.hasFocus()) return;
+
+    const body = message.deleted
+      ? 'Сообщение удалено'
+      : message.mediaType === 'voice'
+      ? '🎤 Голосовое сообщение'
+      : message.mediaType === 'image'
+      ? message.text || '📷 Фото'
+      : (message.text || '').slice(0, 120);
+
+    const n = new Notification(`${senderName} · Voice Messenger`, {
+      body: body || 'Новое сообщение',
+      icon: '/icon.png',
+      tag: `vm_${senderName}`, // не плодим кучу уведомлений от одного человека
+      silent: true, // звук уже играет audioTone
+    });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch { /* уведомления не критичны */ }
+}
+
 export function App() {
-  const APP_VERSION = '1.0.11'; // синхронизировано с package.json и Sidebar
+  const APP_VERSION = '1.0.12'; // синхронизировано с package.json и Sidebar
 
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('vm_username');
@@ -69,6 +98,9 @@ export function App() {
   // ref текущего выбранного пользователя (для read-квитанций и звуков)
   const selectedUserRef = useRef<User | null>(null);
   useEffect(() => { selectedUserRef.current = selectedUser; }, [selectedUser]);
+  // v1.0.12: кэш последних визитов (чтобы при уходе собеседника в офлайн
+  // шапка чата показывала время, а не «давно» — онлайн-список lastSeen не содержит)
+  const lastSeenCacheRef = useRef<Record<string, number>>({});
 
   const socketRef = useRef<Socket | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
@@ -142,6 +174,12 @@ export function App() {
       setUsers(allUsers);
       // v1.0.11: запрашиваем известных (в т.ч. офлайн) пользователей
       socket.emit('users:known');
+      // v1.0.12: спрашиваем разрешение на системные уведомления (после первого входа)
+      try {
+        if ('Notification' in window && Notification.permission === 'default') {
+          Notification.requestPermission().catch(() => {});
+        }
+      } catch { /* не критично */ }
     });
 
     // Регистрация не прошла (имя занято/пароль неверный)
@@ -174,8 +212,24 @@ export function App() {
 
     socket.on('users:update', (allUsers: User[]) => {
       setUsers(allUsers);
-      // Update selectedUser reference if it was changed
-      setSelectedUser(prev => (prev ? allUsers.find(u => u.id === prev.id) || prev : null));
+      // v1.0.12 FIX: сверяем ВЫБРАННОГО собеседника по СТАБИЛЬНОМУ имени, а не socket.id.
+      // Раньше офлайн-контакт не «оживал» в шапке открытого чата, когда входил в сеть
+      // (новый объект пользователя имеет новый socket.id, а офлайн-User имеет id='') —
+      // статус обновлялся только после перевыбора чата.
+      setSelectedUser(prev => {
+        if (!prev) return null;
+        const fresh = allUsers.find(
+          u => u.username.toLowerCase() === prev.username.toLowerCase()
+        );
+        if (fresh) return { ...fresh };
+        // v1.0.12: собеседник исчез из списка онлайн → помечаем офлайн
+        // (иначе шапка чата зависала в «В сети», пока не перевыберешь чат)
+        if (prev.online) {
+          const cached = lastSeenCacheRef.current[prev.username.toLowerCase()];
+          return { ...prev, online: false, inCallWith: null, lastSeen: cached ?? prev.lastSeen };
+        }
+        return prev;
+      });
     });
 
     socket.on('chat:receive', (message: ChatMessage) => {
@@ -206,6 +260,8 @@ export function App() {
           if (soundEnabledRef.current) {
             audioTone.playMessageTone();
           }
+          // v1.0.12: системное уведомление, когда вкладка не в фокусе
+          showDesktopNotification(partnerName, message);
         }
       }
     });
@@ -249,6 +305,12 @@ export function App() {
     // v1.0.11: известные пользователи (в т.ч. офлайн) из БД сервера
     socket.on('users:known_list', ({ users: known }: { users: KnownUser[] }) => {
       setKnownUsers(Array.isArray(known) ? known : []);
+      // v1.0.12: пополняем кэш последних визитов
+      for (const k of known || []) {
+        if (k?.username && k.lastSeen) {
+          lastSeenCacheRef.current[k.username.toLowerCase()] = k.lastSeen;
+        }
+      }
     });
 
     // v1.0.11: собеседник (или мы) удалил сообщение → помечаем удалённым
@@ -404,6 +466,22 @@ export function App() {
     });
   };
 
+  // v1.0.12: пересылка сообщения другому контакту
+  const [forwardingMessage, setForwardingMessage] = useState<ChatMessage | null>(null);
+  const handleForwardMessage = (message: ChatMessage, target: User) => {
+    if (!socketRef.current) return;
+    socketRef.current.emit('chat:send', {
+      recipientId: target.id,
+      recipientUsername: target.username,
+      text: message.text,
+      mediaUrl: message.mediaUrl,
+      mediaType: message.mediaType,
+      duration: message.duration,
+      forwardedFrom: message.forwardedFrom || message.senderName,
+    });
+    setForwardingMessage(null);
+  };
+
   // Trigger call
   const handleStartCall = (user: User) => {
     startCall(user.id, user.username, user.avatar);
@@ -454,6 +532,18 @@ export function App() {
             onDeleteMessage={handleDeleteMessage}
             isPartnerTyping={selectedUser ? Boolean(typingUsers[selectedUser.username]) : false}
             onTyping={(recipientId, isTyping) => socketRef.current?.emit('chat:typing', { recipientId, isTyping })}
+            onRequestForward={setForwardingMessage}
+          />
+
+          {/* v1.0.12: модалка пересылки сообщения */}
+          <ForwardModal
+            isOpen={forwardingMessage !== null}
+            message={forwardingMessage}
+            users={users}
+            knownUsers={knownUsers}
+            currentUsername={currentUser.username}
+            onClose={() => setForwardingMessage(null)}
+            onForward={target => forwardingMessage && handleForwardMessage(forwardingMessage, target)}
           />
 
           {/* Voice Call Active / Incoming Modal */}

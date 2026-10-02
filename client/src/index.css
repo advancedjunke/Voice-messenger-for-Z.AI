@@ -213,3 +213,36 @@ body {
 .flash-msg {
   animation: msgFlash 1.4s ease-out forwards;
 }
+
+/* ─── v1.0.12: стили модалки пересылки и плавающих элементов ─── */
+.vm-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #374151 transparent;
+}
+
+/* hover-подсветка строки контакта в ForwardModal */
+.vm-scroll button:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.25);
+}
+
+/* Плавное «всплытие» кнопки прокрутки вниз */
+@keyframes scrollBtnIn {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.92);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.scroll-btn-in {
+  animation: scrollBtnIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity, transform;
+}
+
+/* Тень-подсветка для плавающих hover-кнопок действий над пузырями */
+.group\/msg:hover .group-hover\:opacity-100 {
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.45));
+}

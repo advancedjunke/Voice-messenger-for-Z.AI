@@ -1,8 +1,8 @@
 /**
- * E2E тест Voice Messenger v1.0.11
+ * E2E тест Voice Messenger v1.0.12
  * Проверяет: регистрацию, чат, историю через реконнект, пароли,
  * дубли имён, сигналинг звонков, занятость, офлайн-сообщения, ответы,
- * удаление сообщений, last seen и API обновлений.
+ * удаление сообщений, last seen, пересылку и API обновлений.
  * Запуск: bun e2e-test.mjs [serverUrl]
  */
 import { io } from 'socket.io-client';
@@ -292,6 +292,38 @@ const delRel = await fetch(`${SERVER}/api/updates/publish/9.9.9-test`, { method:
 ok('DELETE /api/updates/publish/:version — ok', delRel.success === true, JSON.stringify(delRel));
 const checkAfter = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
 ok('После удаления релиза check → available:false', checkAfter.available === false, JSON.stringify(checkAfter));
+
+// ─── 11. Пересылка сообщений (v1.0.12) ───
+console.log('11. Пересылка сообщений (forward)');
+const carolFwd = await connectAndRegister('Carol', 'secret123');
+ok('Carol снова в сети (для forward)', !carolFwd.failed);
+
+const carolFwdP = waitFor(carolFwd, 'chat:receive', 4000, m => m.text === 'Пересылаемое сообщение от Bob');
+const fwdEchoP = waitFor(alice2, 'chat:receive', 4000, m => m.text === 'Пересылаемое сообщение от Bob');
+alice2.emit('chat:send', {
+  recipientUsername: 'Carol',
+  text: 'Пересылаемое сообщение от Bob',
+  mediaType: 'text',
+  forwardedFrom: 'Bob',
+});
+const [carolFwdMsg, fwdEcho] = await Promise.all([carolFwdP, fwdEchoP]);
+ok('Carol получила пересланное сообщение', Boolean(carolFwdMsg));
+ok('Пересланное сообщение помечено forwardedFrom=Bob', carolFwdMsg.forwardedFrom === 'Bob', `получено: ${JSON.stringify(carolFwdMsg.forwardedFrom)}`);
+ok('Эхо пересылки у отправителя тоже с forwardedFrom', fwdEcho.forwardedFrom === 'Bob');
+carolFwd.disconnect();
+
+// ─── 12. Бродкаст списка известных при регистрации (v1.0.12) ───
+console.log('12. known_list обновляется у других клиентов при регистрации');
+const freshListP = waitFor(alice2, 'users:known_list', 5000, d => (d.users || []).some(u => u.username === 'FwdUser'));
+const fwdUser = await connectAndRegister('FwdUser');
+ok('FwdUser зарегистрирован', !fwdUser.failed);
+try {
+  const freshList = await freshListP;
+  ok('Alice получила обновлённый known_list с FwdUser без переподключения', (freshList.users || []).some(u => u.username === 'FwdUser'));
+} catch {
+  ok('Alice получила обновлённый known_list с FwdUser без переподключения', false, 'таймаут users:known_list');
+}
+fwdUser.disconnect();
 
 // ─── Итог ───
 console.log('\n' + '═'.repeat(50));
