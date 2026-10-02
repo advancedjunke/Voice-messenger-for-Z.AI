@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Copy, Check, Server, Globe, Wifi, Info, RotateCcw } from 'lucide-react';
+import { X, Copy, Check, Server, Globe, Wifi, Info, RotateCcw, Database, Loader2, Eye, EyeOff, PlugZap, Unplug } from 'lucide-react';
+
+interface DbStatus {
+  usingPostgres: boolean;
+  connected: boolean;
+  host: string | null;
+}
 
 interface ServerSettingsModalProps {
   isOpen: boolean;
@@ -29,6 +35,14 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // v1.0.19: раздел «База данных (Neon PostgreSQL)»
+  const [dbStatus, setDbStatus] = useState<DbStatus | null>(null);
+  const [dbUrl, setDbUrl] = useState('');
+  const [showDbUrl, setShowDbUrl] = useState(false);
+  const [dbBusy, setDbBusy] = useState(false);
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [dbNote, setDbNote] = useState<string | null>(null);
+
   // При открытии — заполняем поле текущим значением и тянем LAN-адреса
   useEffect(() => {
     if (!isOpen) return;
@@ -55,9 +69,31 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
         window.clearTimeout(timer);
         setInfoLoading(false);
       });
+
+    // v1.0.19: статус базы данных
+    setDbStatus(null);
+    setDbError(null);
+    setDbNote(null);
+    setDbBusy(false);
+    const dbCtrl = new AbortController();
+    const dbTimer = window.setTimeout(() => dbCtrl.abort(), 4000);
+    fetch(`${currentServerUrl}/api/db/status`, { signal: dbCtrl.signal })
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then(data => setDbStatus({ usingPostgres: !!data?.usingPostgres, connected: !!data?.connected, host: data?.host || null }))
+      .catch(() => setDbStatus(null))
+      .finally(() => window.clearTimeout(dbTimer));
+
+    // Файл настроек существует? (только настольное приложение)
+    const vm = (window as any).voiceMessenger;
+    if (vm?.getDbConfig) {
+      vm.getDbConfig().then((cfg: any) => setDbNote(cfg?.envFile || null)).catch(() => {});
+    }
+
     return () => {
       ctrl.abort();
       window.clearTimeout(timer);
+      dbCtrl.abort();
+      window.clearTimeout(dbTimer);
     };
   }, [isOpen, currentServerUrl]);
 
@@ -109,6 +145,28 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
   const handleReset = () => {
     localStorage.removeItem('vm_server_url');
     window.location.reload();
+  };
+
+  // v1.0.19: сохранить строку Neon и перезапустить приложение
+  const handleSaveDb = async () => {
+    const vm = (window as any).voiceMessenger;
+    if (!vm?.saveDbConfig) {
+      setDbError('Доступно только в настольном приложении. Для сервера из батника создайте файл server/.env со строкой DATABASE_URL=…');
+      return;
+    }
+    if (dbBusy) return;
+    setDbError(null);
+    setDbBusy(true);
+    try {
+      const res = await vm.saveDbConfig(dbUrl.trim());
+      if (res && res.ok === false) {
+        setDbError(res.error || 'Не удалось сохранить');
+        setDbBusy(false);
+      }
+      // при успехе приложение само перезапустится (app.relaunch)
+    } catch {
+      // окно уже перезапускается
+    }
   };
 
   if (!isOpen) return null;
@@ -221,6 +279,114 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                 и дайте другу адрес вида <code className="font-mono">http://192.168.x.x:3001</code>.
               </div>
             )}
+          </div>
+
+          {/* ─── v1.0.19: База данных (Neon PostgreSQL) ─── */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-sky-400" />
+                <h4 className="text-xs font-semibold text-gray-300">База данных (Neon PostgreSQL)</h4>
+              </div>
+              {dbStatus && (
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
+                    dbStatus.usingPostgres && dbStatus.connected
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : dbStatus.usingPostgres
+                      ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                      : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      dbStatus.usingPostgres && dbStatus.connected
+                        ? 'bg-emerald-400 animate-pulse'
+                        : dbStatus.usingPostgres
+                        ? 'bg-amber-400'
+                        : 'bg-gray-500'
+                    }`}
+                  />
+                  {dbStatus.usingPostgres && dbStatus.connected
+                    ? 'Neon подключён'
+                    : dbStatus.usingPostgres
+                    ? 'Ошибка подключения'
+                    : 'Файловый режим'}
+                </span>
+              )}
+            </div>
+
+            {dbStatus && (
+              <p className="text-[11px] text-gray-500 mb-2 leading-relaxed">
+                {dbStatus.usingPostgres && dbStatus.connected
+                  ? `История переписки и аккаунты хранятся централизованно (${dbStatus.host}). Подключите эту же базу у друзей-хостов — увидите общую историю.`
+                  : dbStatus.usingPostgres
+                  ? `Строка подключения задана (${dbStatus.host}), но сервер не смог подключиться. Проверьте строку и доступность базы.`
+                  : 'История сообщений живёт только в памяти хоста и очищается при его перезапуске. Подключите бесплатную базу Neon — и история будет сохраняться навсегда.'}
+              </p>
+            )}
+
+            <div className="relative">
+              <Database className="absolute left-3.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+              <input
+                type={showDbUrl ? 'text' : 'password'}
+                value={dbUrl}
+                onChange={e => {
+                  setDbUrl(e.target.value);
+                  setDbError(null);
+                }}
+                placeholder="postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require"
+                className="w-full pl-10 pr-10 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-xs text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500/50 transition-all"
+              />
+              <button
+                type="button"
+                onClick={() => setShowDbUrl(v => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-gray-500 hover:text-gray-300 transition-colors"
+                tabIndex={-1}
+                aria-label={showDbUrl ? 'Скрыть строку подключения' : 'Показать строку подключения'}
+              >
+                {showDbUrl ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+
+            {dbError && (
+              <p className="mt-1.5 text-[11px] text-red-400 leading-relaxed">{dbError}</p>
+            )}
+
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={handleSaveDb}
+                disabled={dbBusy}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-sky-600 text-white hover:bg-sky-500 active:scale-95 disabled:opacity-60 transition-all shadow-lg shadow-sky-600/20"
+              >
+                {dbBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
+                {dbBusy ? 'Сохраняю…' : 'Подключить и перезапустить'}
+              </button>
+              {dbStatus?.usingPostgres && (window as any).voiceMessenger?.saveDbConfig && (
+                <button
+                  onClick={() => { setDbUrl(''); handleSaveDb(); }}
+                  disabled={dbBusy}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-60 transition-colors"
+                >
+                  <Unplug className="w-3.5 h-3.5" />
+                  Отключить базу
+                </button>
+              )}
+            </div>
+
+            {dbNote && (
+              <p className="mt-1.5 text-[10px] text-gray-600 font-mono truncate" title={dbNote}>
+                Настройки: {dbNote}
+              </p>
+            )}
+
+            <p className="mt-1.5 text-[11px] text-gray-500 leading-relaxed flex gap-1.5">
+              <Info className="w-3.5 h-3.5 shrink-0 text-gray-600" />
+              <span>
+                Бесплатно на <a href="https://neon.tech" target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">neon.tech</a>:
+                создайте проект → скопируйте Connection string → вставьте сюда. База нужна только хосту.
+              </span>
+            </p>
           </div>
 
           {/* Смена адреса */}

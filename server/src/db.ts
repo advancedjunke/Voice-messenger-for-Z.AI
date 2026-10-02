@@ -14,6 +14,25 @@ let isDbConnected = false;
 
 const connectionString = process.env.DATABASE_URL;
 
+// v1.0.19: статус БД для UI (/api/db/status) — без кредов, только режим и хост
+let dbStatus: { usingPostgres: boolean; connected: boolean; host: string | null } = {
+  usingPostgres: false,
+  connected: false,
+  host: null,
+};
+
+export function getDbStatus() {
+  return { ...dbStatus };
+}
+
+function parseDbHost(url: string): string | null {
+  try {
+    return new URL(url).host || null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── In-memory fallback: работает и без БД ───
 const localUsers = new Map<string, { username: string; avatar?: string; passwordHash?: string; authToken?: string; lastSeen: number }>();
 // Fallback для релизов: автообновления работают даже без БД
@@ -71,12 +90,16 @@ function persistLocalUsers() {
 }
 
 if (connectionString) {
+  dbStatus.usingPostgres = true;
+  dbStatus.host = parseDbHost(connectionString);
   try {
+    // v1.0.19: SSL только когда он реально нужен (Neon / sslmode в URL).
+    // Раньше SSL навязывался всем — из-за этого сервер не мог подключиться
+    // к обычному PostgreSQL без TLS (падало всё в файловый режим).
+    const needsSsl = /sslmode=(require|verify|prefer)|neon\.tech/i.test(connectionString);
     pool = new Pool({
       connectionString,
-      ssl: {
-        rejectUnauthorized: false,
-      },
+      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
       idleTimeoutMillis: 20000,
       connectionTimeoutMillis: 10000,
       max: 10,
@@ -187,6 +210,24 @@ export async function initDatabase() {
       `);
 
       console.log('✅ [Neon DB] Таблицы users, messages и app_releases готовы к работе.');
+      dbStatus.connected = true;
+
+      // v1.0.19: если аккаунты успели создаться в файловом режиме (Neon был
+      // недоступен на старте), переносим их в базу — ничего не теряем.
+      try {
+        for (const u of localUsers.values()) {
+          if (!u.passwordHash) continue;
+          await client.query(
+            `INSERT INTO users (username, avatar, password_hash, auth_token, last_seen)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (username) DO NOTHING`,
+            [u.username, u.avatar || null, u.passwordHash || null, u.authToken || null, u.lastSeen || Date.now()]
+          );
+        }
+      } catch (mErr: any) {
+        console.warn('[Neon DB] Не удалось перенести локальные аккаунты:', mErr.message);
+      }
+
       return true;
     } finally {
       client.release();
@@ -194,8 +235,36 @@ export async function initDatabase() {
   } catch (err: any) {
     console.error('⚠️ [Neon DB] Ошибка подключения к Neon базе:', err.message || err);
     isDbConnected = false;
+    dbStatus.connected = false;
     return false;
   }
+}
+
+// v1.0.19: Neon free tier "усыпляет" базу — первое подключение может не
+// пройти. Раньше попытка была одна: сервер навсегда падал в файловый режим.
+// Теперь: до 5 попыток с нарастающей паузой, затем фоновая проверка раз в
+// минуту; как только база ожила — она подхватывается, а аккаунты, созданные
+// в файловом режиме, переносятся в неё автоматически.
+export async function initDatabaseWithRetry(): Promise<boolean> {
+  if (!pool) {
+    console.log('ℹ️ [Neon DB] DATABASE_URL не указан. Сервер работает во встроенном режиме хранения в памяти.');
+    return false;
+  }
+  const delays = [0, 4000, 10000, 20000, 40000];
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i] > 0) {
+      console.log(`[Neon DB] Повторная попытка подключения через ${delays[i] / 1000}с…`);
+      await new Promise(r => setTimeout(r, delays[i]));
+    }
+    if (await initDatabase()) return true;
+  }
+  console.warn('[Neon DB] База недоступна — работаем в файловом режиме, подключение проверяем раз в минуту.');
+  const timer = setInterval(() => {
+    if (isDbConnected) { clearInterval(timer); return; }
+    initDatabase().then(ok => { if (ok) { clearInterval(timer); console.log('✅ [Neon DB] База данных подключилась (после повторных попыток).'); } });
+  }, 60000);
+  timer.unref?.();
+  return false;
 }
 
 export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string, authToken?: string) {

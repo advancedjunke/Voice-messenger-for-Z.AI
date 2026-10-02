@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { Server, Socket } from 'socket.io';
 import cors from 'cors';
 import { User, ChatMessage, ReplyMeta, KnownUser } from './types.js';
-import { initDatabase, dbSaveUser, dbGetUser, dbFindUserByName, dbGetUserByToken, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers } from './db.js';
+import { initDatabaseWithRetry, dbSaveUser, dbGetUser, dbFindUserByName, dbGetUserByToken, dbSaveMessage, dbGetHistory, dbGetLatestRelease, dbGetReleasePayload, dbPublishRelease, dbDeleteRelease, dbMarkMessageDeleted, dbSetLastSeen, dbGetKnownUsers, getDbStatus } from './db.js';
 import { startDiscoveryResponder } from './discovery.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,8 +21,8 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(clientDistPath));
 
-// Initialize PostgreSQL database connection
-initDatabase().catch(err => console.error('[Neon DB Init Error]', err));
+// v1.0.19: подключение к PostgreSQL/Neon с ретраями (база может «проснуться» не сразу)
+initDatabaseWithRetry().catch(err => console.error('[Neon DB Init Error]', err));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -109,6 +109,11 @@ app.get('/api/server-info', (_req, res) => {
     lanUrls: getLanAddresses(),
     onlineCount: usersBySocketId.size,
   });
+});
+
+// v1.0.19: статус базы данных для UI (без кредов — только режим и хост Neon)
+app.get('/api/db/status', (_req, res) => {
+  res.json(getDbStatus());
 });
 
 // ────────────────────────────────────────────────────────────────

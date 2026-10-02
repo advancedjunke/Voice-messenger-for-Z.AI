@@ -48,7 +48,7 @@ function initFileLogging() {
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     logStream = fs.createWriteStream(p, { flags: 'a' });
-    logStream.write(`\n────── Запуск приложения v1.0.18 · ${new Date().toISOString()} ───────\n`);
+    logStream.write(`\n────── Запуск приложения v1.0.19 · ${new Date().toISOString()} ───────\n`);
     const wrap = (orig) => (...args) => {
       try { orig(...args); logStream.write(`[${new Date().toISOString()}] ${util.format(...args)}\n`); } catch { /* не критично */ }
     };
@@ -68,6 +68,11 @@ function loadOptionalEnvFile() {
   if (app.isPackaged) {
     candidates.push(path.join(path.dirname(app.getPath('exe')), 'voice-messenger.env'));
   }
+  // v1.0.19: env-файл в папке данных (записывается из настроек приложения —
+  // в Program Files писать нельзя, а в %APPDATA% можно)
+  try {
+    candidates.push(path.join(app.getPath('userData'), 'voice-messenger.env'));
+  } catch { /* userData недоступен */ }
   candidates.push(path.join(__dirname, '../server/.env'));
 
   for (const file of candidates) {
@@ -284,9 +289,50 @@ ipcMain.handle('vm:rehost', async () => {
   return { ok: true, url: target, logPath: getLogPath() };
 });
 
+// ────────────────────────────────────────────────────────────────
+// v1.0.19: IPC «База данных (Neon)» — пользователь вставляет строку
+// подключения в настройках, мы сохраняем её в %APPDATA%/VoiceMessenger/
+// voice-messenger.env и перезапускаем приложение (встроенный сервер
+// подхватит DATABASE_URL при старте).
+// ────────────────────────────────────────────────────────────────
+const userDataEnvFile = () => path.join(app.getPath('userData'), 'voice-messenger.env');
+
+ipcMain.handle('vm:get-db-config', () => {
+  let configured = false;
+  try { configured = fs.existsSync(userDataEnvFile()); } catch { /* нет доступа */ }
+  return { configured, envFile: userDataEnvFile() };
+});
+
+ipcMain.handle('vm:save-db-config', (_e, rawUrl) => {
+  const value = String(rawUrl || '').trim();
+  try {
+    if (!value) {
+      // Пустая строка = отключить базу (вернуться в файловый режим)
+      fs.rmSync(userDataEnvFile(), { force: true });
+    } else {
+      if (!/^postgres(ql)?:\/\//i.test(value)) {
+        return { ok: false, error: 'Строка подключения должна начинаться с postgresql:// …' };
+      }
+      let parsed;
+      try { parsed = new URL(value); } catch { return { ok: false, error: 'Некорректная строка подключения' }; }
+      if (!parsed.hostname) return { ok: false, error: 'В строке нет хоста базы данных' };
+      fs.mkdirSync(path.dirname(userDataEnvFile()), { recursive: true });
+      fs.writeFileSync(userDataEnvFile(), `DATABASE_URL=${value}\n`, 'utf8');
+      console.log(`[DB] Сохранена строка подключения Neon → ${parsed.host}`);
+    }
+  } catch (err) {
+    return { ok: false, error: 'Не удалось сохранить файл настроек: ' + (err?.message || err) };
+  }
+  // Чистый перезапуск: убираем дочерний сервер-процесс и стартуем заново
+  stopServerChild();
+  app.relaunch();
+  app.exit(0);
+  return { ok: true };
+});
+
 app.whenReady().then(async () => {
   initFileLogging();
-  console.log(`🚀 Voice Messenger v1.0.18 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
+  console.log(`🚀 Voice Messenger v1.0.19 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
   const serverTarget = await resolveServerTarget();
   createWindow(serverTarget);
 
