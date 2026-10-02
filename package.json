@@ -1,6 +1,6 @@
 {
   "name": "voice-messenger",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Voice Messenger with P2P WebRTC Calls and Chat",
   "main": "electron/main.cjs",
   "private": true,
