@@ -6,7 +6,7 @@ title Voice Messenger — Сервер
 cd /d "%~dp0"
 
 echo ==========================================================
-echo    🎙️  Voice Messenger — запуск сервера  (v1.0.17)
+echo    🎙️  Voice Messenger — запуск сервера  (v1.0.18)
 echo ==========================================================
 echo.
 echo  Этот компьютер станет ХОСТОМ чата. Все, кто откроет
@@ -113,7 +113,7 @@ echo ==========================================================
 echo.
 
 REM Подсказка: ADDRESS уже в переменной среды PORT (по умолчанию 3001)
-node "%ROOT%server\dist\index.js"
+if exist "%ROOT%server\dist\index.bundle.mjs" (node "%ROOT%server\dist\index.bundle.mjs") else (node "%ROOT%server\dist\index.js")
 
 echo.
 echo ==========================================================

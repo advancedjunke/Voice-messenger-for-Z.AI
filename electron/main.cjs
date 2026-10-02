@@ -1,8 +1,10 @@
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const url = require('url');
-const { discoverLanServer, waitForLocalHealth } = require('./lan-discovery.cjs');
+const util = require('util');
+const { spawn } = require('child_process');
+const { discoverLanServer, checkHttpHealth, waitForLocalHealth } = require('./lan-discovery.cjs');
 
 // 1. Single Instance Lock (prevents multiple windows from opening)
 const gotTheLock = app.requestSingleInstanceLock();
@@ -13,8 +15,7 @@ if (!gotTheLock) {
 
 let mainWindow = null;
 
-const CLOUD_URL = 'https://f2f9c29f9c574a2c-217-199-233-97.serveousercontent.com';
-const LOCAL_URL = 'http://localhost:3001';
+const LOCAL_URL = 'http://127.0.0.1:3001';
 
 // ────────────────────────────────────────────────────────────────
 // v1.0.14: ЛОГИЧЕСКАЯ ЦЕПОЧКА ЗАПУСКА ПРИЛОЖЕНИЯ
@@ -25,8 +26,37 @@ const LOCAL_URL = 'http://localhost:3001';
 //         приложение запускает встроенный сервер на своём ПК,
 //         и все, кто откроет приложение после него, найдут его
 //         через Шаг 2 (UDP-поиск) автоматически.
-//  Шаг 4. Всё остальное не удалось → облачный сервер (последний рубеж).
+//
+//  v1.0.18: мёртвый облачный фолбэк УДАЛЁН — он молча подсовывал
+//  клиенту недоступный адрес, из-за чего висело «Нет связи с сервером».
+//  Теперь если встроенный сервер не поднялся, остаёмся на localhost,
+//  а экран входа даёт кнопку «Перезапустить сервер» (IPC vm:rehost).
 // ────────────────────────────────────────────────────────────────
+
+// ────────────────────────────────────────────────────────────────
+// v1.0.18: ЛОГИ В ФАЙЛ — %APPDATA%/VoiceMessenger/main.log
+// Раньше ошибки встроенного сервера уходили «в никуда» (консоли нет),
+// и невозможно было понять, почему «Нет связи с сервером».
+// ────────────────────────────────────────────────────────────────
+let logStream = null;
+function getLogPath() {
+  try { return path.join(app.getPath('userData'), 'main.log'); } catch { return null; }
+}
+function initFileLogging() {
+  const p = getLogPath();
+  if (!p) return;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    logStream = fs.createWriteStream(p, { flags: 'a' });
+    logStream.write(`\n────── Запуск приложения v1.0.18 · ${new Date().toISOString()} ───────\n`);
+    const wrap = (orig) => (...args) => {
+      try { orig(...args); logStream.write(`[${new Date().toISOString()}] ${util.format(...args)}\n`); } catch { /* не критично */ }
+    };
+    console.log = wrap(console.log.bind(console));
+    console.warn = wrap(console.warn.bind(console));
+    console.error = wrap(console.error.bind(console));
+  } catch { /* логирование не критично */ }
+}
 
 /**
  * Мини-загрузчик .env: если рядом с приложением лежит voice-messenger.env
@@ -56,12 +86,20 @@ function loadOptionalEnvFile() {
   }
 }
 
-/** Путь к скомпилированному серверу внутри приложения (или в исходниках). */
+/**
+ * Путь к скомпилированному серверу внутри приложения (или в исходниках).
+ * v1.0.18: сначала index.bundle.mjs — сервер, собранный esbuild ВМЕСТЕ со
+ * всеми зависимостями. Раньше мы клали в пакет server/node_modules, но
+ * electron-builder молча выбрасывал вложенные node_modules → встроенный
+ * сервер падал с ERR_MODULE_NOT_FOUND → «Нет связи с сервером».
+ */
 function getServerEntryPath() {
   // asar: false → в пакете сервер лежит рядом как обычные файлы
   const candidates = [
-    path.join(__dirname, '../server/dist/index.js'),            // исходники / unpacked
-    path.join(process.resourcesPath || '', 'app/server/dist/index.js'), // установленное приложение
+    path.join(__dirname, '../server/dist/index.bundle.mjs'),                  // исходники / unpacked
+    path.join(__dirname, '../server/dist/index.js'),                          // исходники без бандла
+    path.join(process.resourcesPath || '', 'app/server/dist/index.bundle.mjs'), // установленное приложение
+    path.join(process.resourcesPath || '', 'app/server/dist/index.js'),
   ];
   for (const p of candidates) {
     try { if (p && fs.existsSync(p)) return p; } catch { /* resourcesPath может отсутствовать */ }
@@ -69,15 +107,26 @@ function getServerEntryPath() {
   return null;
 }
 
+// ─── Резервный запуск сервера ОТДЕЛЬНЫМ процессом ───
+let serverChild = null;
+function stopServerChild() {
+  if (serverChild) {
+    try { serverChild.kill(); } catch { /* уже мёртв */ }
+    serverChild = null;
+  }
+}
+
 /**
- * Шаг 3 цепочки: запускаем встроенный сервер ВНУТРИ процесса Electron
- * (Electron содержит Node.js — отдельная установка не нужна).
+ * Шаг 3 цепочки: запускаем встроенный сервер.
+ * Попытка 1 — in-process import() (быстро; Electron содержит Node.js).
+ * Попытка 2 — отдельный процесс через ELECTRON_RUN_AS_NODE (изоляция:
+ * работает даже если у Electron-сборки капризный ESM-лоадер).
  * Сервер слушает 0.0.0.0:3001 + отвечает на UDP-поиск на :3002.
  */
 async function startEmbeddedServer() {
   const serverEntry = getServerEntryPath();
   if (!serverEntry) {
-    console.warn('[Embedded] server/dist/index.js не найден — встроенный хостинг недоступен');
+    console.warn('[Embedded] server/dist/index.bundle.mjs не найден — встроенный хостинг недоступен');
     return false;
   }
 
@@ -94,28 +143,52 @@ async function startEmbeddedServer() {
 
   process.env.VM_EMBEDDED = '1'; // сервер не должен process.exit() при ошибке порта
 
+  // ─── Попытка 1: in-process ───
   try {
-    console.log('[Embedded] 🏠 Сервер в сети не найден — этот ПК становится ХОСТОМ...');
-    // Динамический import() ESM-сервера из CJS-main (Electron 35, Node 22)
+    console.log('[Embedded] 🏠 Сервер в сети не найден — этот ПК становится ХОСТОМ (in-process)...');
     await import(url.pathToFileURL(serverEntry).href);
+    if (await waitForLocalHealth(12000)) {
+      console.log('[Embedded] ✅ Встроенный сервер работает на', LOCAL_URL, '(0.0.0.0)');
+      console.log('[Embedded] → Все, кто запустит приложение в этой сети, подключатся к вам автоматически');
+      return true;
+    }
+    console.warn('[Embedded] In-process сервер не ответил на /health — пробую отдельным процессом');
+    stopServerChild();
   } catch (err) {
-    console.error('[Embedded] Не удалось запустить встроенный сервер:', err?.message || err);
-    return false;
+    console.error('[Embedded] In-process запуск не удался:', err?.message || err);
   }
 
-  const healthy = await waitForLocalHealth(10000);
-  if (healthy) {
-    console.log('[Embedded] ✅ Встроенный сервер работает на http://localhost:3001 (0.0.0.0)');
-    console.log('[Embedded] → Все, кто запустит приложение в этой сети, подключатся к вам автоматически');
+  // ─── Попытка 2: отдельный Node-процесс (ELECTRON_RUN_AS_NODE) ───
+  try {
+    console.log('[Embedded] 🏠 Запускаю сервер отдельным процессом (ELECTRON_RUN_AS_NODE)...');
+    const serverLog = path.join(app.getPath('userData'), 'server.log');
+    const out = fs.openSync(serverLog, 'a');
+    serverChild = spawn(process.execPath, [serverEntry], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ELECTRON_NO_ATTACH_CONSOLE: '1' },
+      stdio: ['ignore', out, out],
+      windowsHide: true,
+    });
+    serverChild.on('exit', (code) => {
+      console.warn(`[Embedded] Процесс сервера завершился (код ${code})`);
+      serverChild = null;
+    });
+    if (await waitForLocalHealth(12000)) {
+      console.log('[Embedded] ✅ Сервер-процесс работает на', LOCAL_URL, '(лог: ' + serverLog + ')');
+      return true;
+    }
+    console.error('[Embedded] Сервер-процесс тоже не ответил на /health. Смотрите server.log:', serverLog);
+  } catch (err) {
+    console.error('[Embedded] Запуск отдельным процессом не удался:', err?.message || err);
   }
-  return healthy;
+
+  return false;
 }
 
 /** Возвращает URL сервера, к которому подключается UI. */
 async function resolveServerTarget() {
-  // Шаг 1: сервер уже работает на этом ПК?
-  const { checkHttpHealth } = require('./lan-discovery.cjs');
-  if (await checkHttpHealth(`${LOCAL_URL}/health`, 500)) {
+  // Шаг 1: сервер уже работает на этом ПК? (127.0.0.1 — чтобы не зависеть
+  // от того, во что Windows разрешил имя «localhost»: IPv4 или IPv6)
+  if (await checkHttpHealth(`${LOCAL_URL}/health`, 600)) {
     console.log('[Chain] Шаг 1 ✅ Найден уже запущенный сервер на этом ПК →', LOCAL_URL);
     return LOCAL_URL;
   }
@@ -134,9 +207,14 @@ async function resolveServerTarget() {
     return LOCAL_URL;
   }
 
-  // Шаг 4: облачный резерв
-  console.log('[Chain] Шаг 4 ⚠️ Встроенный сервер недоступен → облачный резерв', CLOUD_URL);
-  return CLOUD_URL;
+  // Шаг 4: ничего не вышло — остаёмся на localhost. Экран входа покажет
+  // ошибку и кнопку «Перезапустить сервер», подробности — в main.log.
+  console.error('[Chain] Шаг 4 ❌ Встроенный сервер запустить не удалось — подробности в main.log');
+  return LOCAL_URL;
+}
+
+function localHtmlPath() {
+  return path.join(__dirname, '../client/dist/index.html');
 }
 
 function createWindow(serverTarget) {
@@ -153,6 +231,7 @@ function createWindow(serverTarget) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -173,10 +252,9 @@ function createWindow(serverTarget) {
   });
 
   // Load the local UI directly from disk with resolved server query
-  const localHtmlPath = path.join(__dirname, '../client/dist/index.html');
-  if (fs.existsSync(localHtmlPath)) {
+  if (fs.existsSync(localHtmlPath())) {
     console.log('✅ Resolved server target:', serverTarget);
-    mainWindow.loadFile(localHtmlPath, { query: { server: serverTarget } });
+    mainWindow.loadFile(localHtmlPath(), { query: { server: serverTarget } });
   } else {
     // Development fallback
     mainWindow.loadURL('http://localhost:5173');
@@ -187,7 +265,28 @@ function createWindow(serverTarget) {
   });
 }
 
+// ────────────────────────────────────────────────────────────────
+// v1.0.18: IPC «Перезапустить сервер» — раньше кнопка «Проверить снова»
+// просто перезагружала страницу с ТЕМ ЖЕ мёртвым адресом (query не менялся),
+// поэтому пользователь никак не мог вытащить приложение из тупика.
+// ────────────────────────────────────────────────────────────────
+ipcMain.handle('vm:rehost', async () => {
+  console.log('[Rehost] 🔁 Пользователь запросил перезапуск сервера');
+  stopServerChild();
+  const target = await resolveServerTarget();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      await mainWindow.loadFile(localHtmlPath(), { query: { server: target } });
+    } catch (err) {
+      console.warn('[Rehost] Не удалось перезагрузить окно:', err?.message || err);
+    }
+  }
+  return { ok: true, url: target, logPath: getLogPath() };
+});
+
 app.whenReady().then(async () => {
+  initFileLogging();
+  console.log(`🚀 Voice Messenger v1.0.18 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
   const serverTarget = await resolveServerTarget();
   createWindow(serverTarget);
 
@@ -204,6 +303,10 @@ app.on('second-instance', () => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   }
+});
+
+app.on('before-quit', () => {
+  stopServerChild();
 });
 
 app.on('window-all-closed', () => {

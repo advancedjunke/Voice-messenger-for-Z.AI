@@ -33,6 +33,9 @@ jobs:
       - name: Build client and server
         run: npm run build
 
+      - name: Remove stray self-reference from server package.json (npm --prefix quirk)
+        run: npm --prefix server pkg delete dependencies.voice-messenger
+
       - name: Remove server dev dependencies before packaging
         run: npm --prefix server prune --omit=dev
 

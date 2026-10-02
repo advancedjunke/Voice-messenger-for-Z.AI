@@ -37,6 +37,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [nameStatus, setNameStatus] = useState<NameStatus>('idle');
+  const [rehosting, setRehosting] = useState(false);
   const checkAbortRef = useRef<AbortController | null>(null);
 
   // Сброс локальных ошибок при вводе
@@ -119,6 +120,20 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
   const shownError = localError || error;
 
+  // v1.0.18: в настольном приложении «Проверить снова» реально перезапускает
+  // сервер (localhost → UDP-поиск → встроенный хост) через IPC, а не просто
+  // перезагружает страницу с тем же мёртвым адресом.
+  const desktopRehost = async () => {
+    const vm = (window as any).voiceMessenger;
+    if (!vm?.rehost || rehosting) return;
+    setRehosting(true);
+    try {
+      await vm.rehost(); // после успеха main-процесс сам перезагрузит окно
+    } catch { /* окно уже перезагружается или IPC недоступен */ }
+    // Если через 25 секунд окно так и не перезагрузилось — возвращаем кнопку
+    setTimeout(() => setRehosting(false), 25000);
+  };
+
   const nameStatusBlock = () => {
     if (mode !== 'register' || !name.trim()) return null;
     switch (nameStatus) {
@@ -181,13 +196,31 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 Нет связи с сервером
               </div>
               <p className="text-red-400/80 leading-relaxed">
-                Вход невозможен, пока сервер недоступен. Проверьте интернет и перезапустите приложение.
+                {(window as any).voiceMessenger?.rehost
+                  ? 'Приложение попробует запустить сервер прямо на этом ПК. Нажмите «Перезапустить сервер» — если не поможет, проверьте интернет.'
+                  : 'Вход невозможен, пока сервер недоступен. Проверьте интернет и перезапустите приложение.'}
               </p>
               <button
-                onClick={() => window.location.reload()}
-                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 rounded-lg text-red-200 transition-colors"
+                onClick={() => {
+                  if ((window as any).voiceMessenger?.rehost) {
+                    desktopRehost();
+                  } else {
+                    window.location.reload();
+                  }
+                }}
+                disabled={rehosting}
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-60 border border-red-500/30 rounded-lg text-red-200 transition-colors"
               >
-                <RefreshCw className="w-3 h-3" /> Проверить снова
+                {rehosting ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" /> Перезапускаю сервер…
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-3 h-3" />
+                    {(window as any).voiceMessenger?.rehost ? 'Перезапустить сервер' : 'Проверить снова'}
+                  </>
+                )}
               </button>
             </div>
           )}

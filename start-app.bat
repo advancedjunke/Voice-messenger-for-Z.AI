@@ -6,7 +6,7 @@ title Voice Messenger — Приложение
 cd /d "%~dp0"
 
 echo ==========================================================
-echo    Voice Messenger - запуск приложения  (v1.0.17)
+echo    Voice Messenger - запуск приложения  (v1.0.18)
 echo ==========================================================
 echo.
 echo  Откроется окно мессенджера. Если сервер ещё не запущен
@@ -71,6 +71,12 @@ if not exist "client\dist\index.html" (
   )
   popd
 )
+if not exist "server\dist\index.bundle.mjs" (
+  echo        Собираю серверный бандл (все зависимости в одном файле)...
+  pushd "server"
+  call npm run build:bundle
+  popd
+)
 echo        Сборка готова [OK]
 
 REM ─── Шаг 4: брандмауэр (чтобы друзья подключались к твоему встроенному серверу) ───
@@ -94,7 +100,7 @@ if exist "node_modules\electron\dist\electron.exe" (
 REM ─── Запасной вариант: Electron не установился — открываем в браузере ───
 echo  [!] Electron не найден — открываю мессенджер в браузере.
 echo  Сервер будет работать в свёрнутом окне — НЕ ЗАКРЫВАЙТЕ его.
-start "VoiceMessenger Server" /min node "server\dist\index.js"
+if exist "server\dist\index.bundle.mjs" (start "VoiceMessenger Server" /min node "server\dist\index.bundle.mjs") else (start "VoiceMessenger Server" /min node "server\dist\index.js")
 timeout /t 3 /nobreak >nul
 start http://localhost:3001
 echo.

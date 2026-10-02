@@ -1,12 +1,12 @@
 {
   "name": "voice-messenger",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Voice Messenger with P2P WebRTC Calls and Chat",
   "main": "electron/main.cjs",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm --prefix client run build && npm --prefix server run build",
+    "build": "npm --prefix client run build && npm --prefix server run build && npm --prefix server run build:bundle",
     "start": "npm --prefix server start",
     "dev": "node start-dev.js",
     "electron:dev": "electron electron/main.cjs",
@@ -41,7 +41,6 @@
       "electron/**/*",
       "server/dist/**/*",
       "server/package.json",
-      "server/node_modules/**/*",
       "client/dist/**/*"
     ],
     "extraResources": [
