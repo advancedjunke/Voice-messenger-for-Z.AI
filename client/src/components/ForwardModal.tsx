@@ -1,3 +1,10 @@
+/* NEW (v1.0.29) S: полировка пересылки — индентовые акценты конвертированы
+   в фиолетовую палитру, hover-лифт строк (тень + 1px, как в сайдбаре),
+   фиолетовый focus-visible у строк и поиска, точка-статус перед «В сети». */
+/* NEW (v1.0.23) TH2: двухтемная конвертация — базовое (светлое) значение без
+   префикса, прежнее тёмное — под dark: (тёмный вид не изменён). Фон модалки —
+   bg-white (модалка, аналогично CallModal); затемняющий оверлей bg-black/70,
+   indigo/emerald-акценты — не тронуты. */
 import React, { useState, useMemo } from 'react';
 import type { User, KnownUser, ChatMessage } from '../types.js';
 import { Forward, Search, X, Check, MessageSquare, Mic, Image as ImageIcon } from 'lucide-react';
@@ -106,17 +113,18 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="w-full max-w-sm bg-gray-900 border border-gray-700/80 rounded-3xl shadow-2xl overflow-hidden animate-emoji-pop flex flex-col max-h-[80vh]"
+        className="w-full max-w-sm bg-white dark:bg-gray-900 border border-gray-300/80 dark:border-gray-700/80 rounded-3xl shadow-2xl overflow-hidden animate-emoji-pop flex flex-col max-h-[80vh]"
       >
         {/* Header */}
-        <div className="px-5 pt-5 pb-3 border-b border-gray-800/80">
+        <div className="px-5 pt-5 pb-3 border-b border-gray-200/80 dark:border-gray-800/80">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-indigo-600/20 border border-indigo-500/30">
-                <Forward className="w-4 h-4 text-indigo-300" />
+              {/* NEW (v1.0.29) S: плитка — фиолетовая палитра (была indigo) */}
+              <div className="p-2 rounded-xl bg-purple-500/15 border border-purple-500/30">
+                <Forward className="w-4 h-4 text-purple-500 dark:text-purple-300" />
               </div>
               <div>
-                <h3 className="font-bold text-white text-sm leading-none">Переслать сообщение</h3>
+                <h3 className="font-bold text-gray-900 dark:text-white text-sm leading-none">Переслать сообщение</h3>
                 <p className="text-[11px] text-gray-500 mt-1">Выберите, кому отправить</p>
               </div>
             </div>
@@ -124,20 +132,21 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
               type="button"
               onClick={onClose}
               title="Закрыть"
-              className="p-2 rounded-xl text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+              className="p-2 rounded-xl text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
 
           {/* Превью пересылаемого сообщения */}
-          <div className="px-3 py-2 rounded-xl bg-gray-950/80 border border-gray-800 flex items-center gap-2.5 min-w-0">
+          <div className="px-3 py-2 rounded-xl bg-gray-100/80 dark:bg-gray-950/80 border border-gray-200 dark:border-gray-800 flex items-center gap-2.5 min-w-0">
             {mediaIcon(message)}
             <div className="min-w-0 flex-1">
-              <p className="text-[11px] text-indigo-300 font-semibold leading-tight">
+              {/* NEW (v1.0.29) S: подпись автора — фиолетовая палитра + светлая пара */}
+              <p className="text-[11px] text-purple-600 dark:text-purple-300 font-semibold leading-tight">
                 {message.senderName === currentUsername ? 'Ваше сообщение' : `От ${message.forwardedFrom || message.senderName}`}
               </p>
-              <p className="text-xs text-gray-300 truncate leading-snug">{messagePreview(message)}</p>
+              <p className="text-xs text-gray-700 dark:text-gray-300 truncate leading-snug">{messagePreview(message)}</p>
             </div>
           </div>
 
@@ -150,7 +159,7 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Поиск контакта..."
-              className="w-full pl-9 pr-4 py-2 bg-gray-950/80 border border-gray-800 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+              className="w-full pl-9 pr-4 py-2 bg-gray-100/80 dark:bg-gray-950/80 border border-gray-200 dark:border-gray-800 rounded-xl text-sm text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40 focus:border-purple-500/40 transition-all"
             />
           </div>
         </div>
@@ -159,7 +168,7 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
         <div className="flex-1 overflow-y-auto p-2 space-y-1 vm-scroll">
           {contacts.length === 0 ? (
             <div className="py-10 text-center text-gray-500 text-sm">
-              <Search className="w-6 h-6 mx-auto mb-2 text-gray-600" />
+              <Search className="w-6 h-6 mx-auto mb-2 text-gray-400 dark:text-gray-600" />
               Контакты не найдены
             </div>
           ) : (
@@ -172,12 +181,12 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
                   type="button"
                   onClick={() => handlePick(c)}
                   disabled={disabled}
-                  className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl text-left transition-all ${
+                  className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl text-left transition-all focus-visible:ring-2 focus-visible:ring-purple-500/40 focus-visible:outline-none ${
                     isSent
                       ? 'bg-emerald-600/20 border border-emerald-500/40'
                       : disabled
                       ? 'opacity-40 cursor-not-allowed border border-transparent'
-                      : 'hover:bg-gray-800/70 border border-transparent cursor-pointer'
+                      : 'hover:bg-gray-200/70 dark:hover:bg-gray-800/70 border border-transparent cursor-pointer hover:-translate-y-px hover:shadow-sm'
                   }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -188,10 +197,15 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
                       size="md"
                     />
                     <div className="min-w-0">
-                      <span className="block font-medium text-sm text-white truncate">{c.username}</span>
+                      <span className="block font-medium text-sm text-gray-900 dark:text-white truncate">{c.username}</span>
                       <p className="text-[11px] truncate">
+                        {/* NEW (v1.0.29) S: точка-статус перед «В сети» (как у
+                            присутствия в сайдбаре) */}
                         {c.online ? (
-                          <span className="text-emerald-500/90">В сети</span>
+                          <span className="inline-flex items-center gap-1 text-emerald-500/90">
+                            <span className="w-1 h-1 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                            В сети
+                          </span>
                         ) : (
                           <span className="text-gray-500">{formatLastSeen(c.lastSeen)}</span>
                         )}
@@ -209,7 +223,7 @@ export const ForwardModal: React.FC<ForwardModalProps> = ({
           )}
         </div>
 
-        <p className="px-5 py-2.5 border-t border-gray-800/80 text-[10px] text-gray-600 text-center">
+        <p className="px-5 py-2.5 border-t border-gray-200/80 dark:border-gray-800/80 text-[10px] text-gray-400 dark:text-gray-600 text-center">
           Пересланные сообщения сохраняют метку об исходном авторе
         </p>
       </div>

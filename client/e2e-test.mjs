@@ -1,11 +1,16 @@
 /**
- * E2E тест Voice Messenger v1.0.12
+ * E2E тест Voice Messenger v1.0.22
  * Проверяет: регистрацию, чат, историю через реконнект, пароли,
  * дубли имён, сигналинг звонков, занятость, офлайн-сообщения, ответы,
  * удаление сообщений, last seen, пересылку и API обновлений.
- * Запуск: bun e2e-test.mjs [serverUrl]
+ * v1.0.22: публикация обновлений защищена админ-токеном (FIX A1 на сервере) —
+ * полный цикл publish→check→download→delete выполняется только при заданном
+ * VM_ADMIN_TOKEN (том же, что и у сервера); без него проверяется лишь отказ
+ * публикации без токена (403/503).
+ * Запуск: bun e2e-test.mjs [serverUrl]   (опционально: VM_ADMIN_TOKEN=секрет)
  */
 import { io } from 'socket.io-client';
+import { createHash } from 'node:crypto';
 
 const SERVER = process.argv[2] || 'http://localhost:3001';
 let passed = 0;
@@ -273,25 +278,55 @@ console.log('10. API автообновлений');
 const health = await fetch(`${SERVER}/health`).then(r => r.json());
 ok('/health отвечает', health.status === 'ok' && typeof health.onlineCount === 'number');
 
-const pub = await fetch(`${SERVER}/api/updates/publish`, {
+// v1.0.22: публикация обновлений — привилегированная операция. Без токена её
+// обязаны отклонять: 403 (токен на сервере есть, но не прислали/не тот) или
+// 503 (на сервере VM_ADMIN_TOKEN вообще не задан — эндпоинт отключён).
+const ADMIN_TOKEN = process.env.VM_ADMIN_TOKEN || '';
+const TEST_PAYLOAD = 'fake-asar-payload-for-testing';
+const TEST_PAYLOAD_SHA = createHash('sha256').update(TEST_PAYLOAD).digest('hex');
+
+const noAuthRes = await fetch(`${SERVER}/api/updates/publish`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ version: '9.9.9-test', payloadBase64: Buffer.from('fake-asar-payload-for-testing').toString('base64'), releaseNotes: 'test' }),
-}).then(r => r.json());
-ok('POST /api/updates/publish — ok', pub.success === true, JSON.stringify(pub));
+  body: JSON.stringify({ version: '9.9.9-test', payloadBase64: Buffer.from(TEST_PAYLOAD).toString('base64'), releaseNotes: 'test' }),
+});
+ok('POST /api/updates/publish БЕЗ токена отклонён (403/503)', noAuthRes.status === 403 || noAuthRes.status === 503, `статус: ${noAuthRes.status}`);
 
-const check = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
-ok('GET /api/updates/check видит релиз 9.9.9-test', check.available && check.latestVersion === '9.9.9-test', JSON.stringify(check));
+if (!ADMIN_TOKEN) {
+  console.log('  ⏭  VM_ADMIN_TOKEN не задан — полный цикл публикации пропущен');
+} else {
+  const pubRes = await fetch(`${SERVER}/api/updates/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': ADMIN_TOKEN },
+    body: JSON.stringify({ version: '9.9.9-test', payloadBase64: Buffer.from(TEST_PAYLOAD).toString('base64'), releaseNotes: 'test' }),
+  });
+  if (pubRes.status === 503) {
+    console.log('  ⏭  на сервере не задан VM_ADMIN_TOKEN — эндпоинт публикации отключён (503)');
+  } else {
+    const pub = await pubRes.json();
+    ok('POST /api/updates/publish с x-admin-token — ok', pubRes.ok && pub.success === true, `${pubRes.status}: ${JSON.stringify(pub)}`);
 
-const dl = await fetch(`${SERVER}/api/updates/download/9.9.9-test`);
-const dlBuf = await dl.text();
-ok('GET /api/updates/download отдаёт payload', dlBuf === 'fake-asar-payload-for-testing', `получено: ${dlBuf.slice(0, 40)}`);
+    const check = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
+    ok('GET /api/updates/check видит релиз 9.9.9-test', check.available && check.latestVersion === '9.9.9-test', JSON.stringify(check));
+    ok('check отдаёт payloadSha256 (SHA-контракт)', (check.payloadSha256 || '') === TEST_PAYLOAD_SHA, `получено: ${check.payloadSha256}`);
 
-// v1.0.11: удаление релиза (очистка за собой, чтобы клиенты не видели фантомный бейдж)
-const delRel = await fetch(`${SERVER}/api/updates/publish/9.9.9-test`, { method: 'DELETE' }).then(r => r.json());
-ok('DELETE /api/updates/publish/:version — ok', delRel.success === true, JSON.stringify(delRel));
-const checkAfter = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
-ok('После удаления релиза check → available:false', checkAfter.available === false, JSON.stringify(checkAfter));
+    const dl = await fetch(`${SERVER}/api/updates/download/9.9.9-test`);
+    const dlBuf = Buffer.from(await dl.arrayBuffer());
+    ok('GET /api/updates/download отдаёт payload', dlBuf.toString() === TEST_PAYLOAD, `получено: ${dlBuf.toString().slice(0, 40)}`);
+    ok('SHA-256 скачанного совпадает с payloadSha256 (заголовок X-Payload-Sha256)', (dl.headers.get('x-payload-sha256') || '') === TEST_PAYLOAD_SHA);
+
+    // очистка за собой, чтобы клиенты не видели фантомный бейдж «Обновление»
+    const delRes = await fetch(`${SERVER}/api/updates/publish/9.9.9-test`, {
+      method: 'DELETE',
+      headers: { 'x-admin-token': ADMIN_TOKEN },
+    });
+    const delRel = await delRes.json();
+    ok('DELETE /api/updates/publish/:version — ok', delRes.ok && delRel.success === true, `${delRes.status}: ${JSON.stringify(delRel)}`);
+    const checkAfter = await fetch(`${SERVER}/api/updates/check`).then(r => r.json());
+    // в БД могут быть и другие релизы — важно, что 9.9.9-test исчез из «последних»
+    ok('После удаления релиз 9.9.9-test исчез из check', !checkAfter.available || checkAfter.latestVersion !== '9.9.9-test', JSON.stringify(checkAfter));
+  }
+}
 
 // ─── 11. Пересылка сообщений (v1.0.12) ───
 console.log('11. Пересылка сообщений (forward)');

@@ -1,3 +1,10 @@
+// NEW (v1.0.29) S: полировка настроек — пилюля статуса со свечением (emerald/
+//   rose), фиолетовые фокус-кольца у ОБЕИХ полей ввода, CTA — градиент
+//   палитры (purple→violet). Sky-тематика секции БД (иконка/ссылка/кнопка
+//   Neon) оставлена — существующий визуальный язык раздела.
+// NEW (v1.0.23) TH2: двухтемная конвертация — базовое значение = светлый тон,
+// dark: = прежний тёмный. Акценты (emerald/red/purple/sky/amber) и оверлей
+// bg-black/70 не тронуты.
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Copy, Check, Server, Globe, Wifi, Info, RotateCcw, Database, Loader2, Eye, EyeOff, PlugZap, Unplug } from 'lucide-react';
 
@@ -180,24 +187,24 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
       aria-label="Настройки сервера"
     >
       <div
-        className="w-full max-w-md bg-gray-900 border border-gray-700/80 rounded-2xl shadow-2xl overflow-hidden animate-scale-in"
+        className="w-full max-w-md bg-white dark:bg-gray-900 border border-gray-300/80 dark:border-gray-700/80 rounded-2xl shadow-2xl overflow-hidden animate-scale-in"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-800">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center">
               <Server className="w-4.5 h-4.5 text-purple-400" />
             </div>
             <div>
-              <h3 className="font-semibold text-white text-sm">Настройки сервера</h3>
+              <h3 className="font-semibold text-gray-900 dark:text-white text-sm">Настройки сервера</h3>
               <p className="text-[11px] text-gray-500">Подключение к хосту мессенджера</p>
             </div>
           </div>
           <button
             onClick={onClose}
             aria-label="Закрыть"
-            className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+            className="p-2 rounded-lg text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -205,23 +212,25 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
 
         <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto custom-scrollbar">
           {/* Текущий сервер */}
-          <div className="flex items-center justify-between p-3 rounded-xl bg-gray-800/50 border border-gray-700/60">
+          <div className="flex items-center justify-between p-3 rounded-xl bg-white/50 dark:bg-gray-800/50 border border-gray-300/60 dark:border-gray-700/60">
             <div className="min-w-0">
               <p className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold mb-0.5">
                 Активный сервер
               </p>
-              <p className="text-xs text-gray-200 font-mono truncate" title={currentServerUrl}>
+              <p className="text-xs text-gray-800 dark:text-gray-200 font-mono truncate" title={currentServerUrl}>
                 {currentServerUrl || 'не определён'}
               </p>
             </div>
+            {/* NEW (v1.0.29) S: пилюля статуса — rose вместо red при ошибке +
+                мягкое цветное свечение (glow) в обоих состояниях */}
             <span
               className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold border ${
                 socketConnected
-                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                  : 'bg-red-500/10 text-red-400 border-red-500/20'
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 shadow-[0_0_12px_rgba(16,185,129,0.25)]'
+                  : 'bg-rose-500/10 text-rose-400 border-rose-500/20 shadow-[0_0_12px_rgba(244,63,94,0.25)]'
               }`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${socketConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full ${socketConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
               {socketConnected ? 'Онлайн' : 'Нет связи'}
             </span>
           </div>
@@ -230,13 +239,13 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
           <div>
             <div className="flex items-center gap-1.5 mb-2">
               <Wifi className="w-3.5 h-3.5 text-emerald-400" />
-              <h4 className="text-xs font-semibold text-gray-300">
+              <h4 className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                 Пригласить друга (та же Wi-Fi / LAN сеть)
               </h4>
             </div>
 
             {infoLoading ? (
-              <div className="p-3 rounded-xl bg-gray-800/40 border border-gray-700/50 text-[11px] text-gray-500">
+              <div className="p-3 rounded-xl bg-white/40 dark:bg-gray-800/40 border border-gray-300/50 dark:border-gray-700/50 text-[11px] text-gray-500">
                 Получаем адреса с сервера…
               </div>
             ) : lanUrls.length > 0 ? (
@@ -244,7 +253,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                 {lanUrls.map(url => (
                   <div
                     key={url}
-                    className="flex items-center gap-2 p-2.5 rounded-xl bg-gray-800/60 border border-gray-700/60"
+                    className="flex items-center gap-2 p-2.5 rounded-xl bg-white/60 dark:bg-gray-800/60 border border-gray-300/60 dark:border-gray-700/60"
                   >
                     <Globe className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     <code className="flex-1 text-[11px] text-emerald-300 font-mono truncate" title={url}>
@@ -253,7 +262,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                     <button
                       onClick={() => handleCopy(url)}
                       title="Скопировать ссылку"
-                      className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 transition-colors shrink-0"
+                      className="p-1.5 rounded-lg text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-300 dark:hover:bg-gray-700 transition-colors shrink-0"
                     >
                       {copiedUrl === url ? (
                         <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -264,7 +273,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                   </div>
                 ))}
                 <p className="text-[11px] text-gray-500 leading-relaxed flex gap-1.5">
-                  <Info className="w-3.5 h-3.5 shrink-0 text-gray-600" />
+                  <Info className="w-3.5 h-3.5 shrink-0 text-gray-400 dark:text-gray-600" />
                   <span>
                     Отправьте другу ссылку{hostname ? ` (ПК «${hostname}»)` : ''} — он откроет её в
                     браузере и сразу попадёт в этот сервер. Если не открывается — разрешите порт в
@@ -286,7 +295,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-1.5">
                 <Database className="w-3.5 h-3.5 text-sky-400" />
-                <h4 className="text-xs font-semibold text-gray-300">База данных (Neon PostgreSQL)</h4>
+                <h4 className="text-xs font-semibold text-gray-700 dark:text-gray-300">База данных (Neon PostgreSQL)</h4>
               </div>
               {dbStatus && (
                 <span
@@ -294,8 +303,8 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                     dbStatus.usingPostgres && dbStatus.connected
                       ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                       : dbStatus.usingPostgres
-                      ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                      : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
+                      ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                      : 'bg-gray-300/40 dark:bg-gray-700/40 text-gray-600 dark:text-gray-400 border-gray-400/40 dark:border-gray-600/40'
                   }`}
                 >
                   <span
@@ -303,7 +312,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                       dbStatus.usingPostgres && dbStatus.connected
                         ? 'bg-emerald-400 animate-pulse'
                         : dbStatus.usingPostgres
-                        ? 'bg-amber-400'
+                        ? 'bg-rose-400'
                         : 'bg-gray-500'
                     }`}
                   />
@@ -336,12 +345,12 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                   setDbError(null);
                 }}
                 placeholder="postgresql://user:pass@ep-xxx.neon.tech/neondb?sslmode=require"
-                className="w-full pl-10 pr-10 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-xs text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-sky-500/50 focus:border-sky-500/50 transition-all"
+                className="w-full pl-10 pr-10 py-2.5 bg-white/80 dark:bg-gray-800/80 border border-gray-300 dark:border-gray-700 rounded-xl text-xs text-gray-900 dark:text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all"
               />
               <button
                 type="button"
                 onClick={() => setShowDbUrl(v => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-gray-500 hover:text-gray-300 transition-colors"
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
                 tabIndex={-1}
                 aria-label={showDbUrl ? 'Скрыть строку подключения' : 'Показать строку подключения'}
               >
@@ -366,7 +375,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
                 <button
                   onClick={() => { setDbUrl(''); handleSaveDb(); }}
                   disabled={dbBusy}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-60 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-60 transition-colors"
                 >
                   <Unplug className="w-3.5 h-3.5" />
                   Отключить базу
@@ -375,13 +384,13 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
             </div>
 
             {dbNote && (
-              <p className="mt-1.5 text-[10px] text-gray-600 font-mono truncate" title={dbNote}>
+              <p className="mt-1.5 text-[10px] text-gray-400 dark:text-gray-600 font-mono truncate" title={dbNote}>
                 Настройки: {dbNote}
               </p>
             )}
 
             <p className="mt-1.5 text-[11px] text-gray-500 leading-relaxed flex gap-1.5">
-              <Info className="w-3.5 h-3.5 shrink-0 text-gray-600" />
+              <Info className="w-3.5 h-3.5 shrink-0 text-gray-400 dark:text-gray-600" />
               <span>
                 Бесплатно на <a href="https://neon.tech" target="_blank" rel="noreferrer" className="text-sky-400 hover:underline">neon.tech</a>:
                 создайте проект → скопируйте Connection string → вставьте сюда. База нужна только хосту.
@@ -391,7 +400,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
 
           {/* Смена адреса */}
           <div>
-            <label htmlFor="server-url-input" className="block text-xs font-semibold text-gray-300 mb-2">
+            <label htmlFor="server-url-input" className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">
               Адрес другого сервера
             </label>
             <input
@@ -404,7 +413,7 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
               }}
               onKeyDown={e => e.key === 'Enter' && handleSave()}
               placeholder="http://192.168.1.5:3001"
-              className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all"
+              className="w-full px-3.5 py-2.5 bg-white/80 dark:bg-gray-800/80 border border-gray-300 dark:border-gray-700 rounded-xl text-sm text-gray-900 dark:text-white font-mono placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 transition-all"
             />
             {error && <p className="mt-1.5 text-[11px] text-red-400">{error}</p>}
             <p className="mt-1.5 text-[11px] text-gray-500">
@@ -414,10 +423,10 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-gray-800 bg-gray-900/80">
+        <div className="flex items-center justify-between gap-2 px-5 py-4 border-t border-gray-200 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-900/80">
           <button
             onClick={handleReset}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             title="Убрать сохранённый адрес и определить сервер автоматически"
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -426,13 +435,13 @@ export const ServerSettingsModal: React.FC<ServerSettingsModalProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
-              className="px-4 py-2 rounded-xl text-xs font-medium text-gray-300 hover:text-white hover:bg-gray-800 transition-colors"
+              className="px-4 py-2 rounded-xl text-xs font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
             >
               Отмена
             </button>
             <button
               onClick={handleSave}
-              className="px-4 py-2 rounded-xl text-xs font-semibold bg-purple-600 text-white hover:bg-purple-500 active:scale-95 transition-all shadow-lg shadow-purple-600/20"
+              className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-500 hover:to-violet-500 active:scale-95 transition-all shadow-lg shadow-purple-600/20"
             >
               Сохранить и перезагрузить
             </button>

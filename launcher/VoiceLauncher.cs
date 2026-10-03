@@ -26,10 +26,16 @@ namespace VoiceMessengerLauncher
         private const int HTCAPTION = 0x2;
 
         // Configuration
-        private const string NEON_URL = "https://ep-steep-snow-b5qfejq3.c-7.us-east-2.aws.neon.tech/sql";
-        private const string NEON_CONN = "postgresql://neondb_owner:npg_a47wDOrGSTFc@ep-steep-snow-b5qfejq3.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require";
-        // Сервер мессенджера — резервный источник обновлений (payload хранится в БД Neon)
-        private const string SERVER_UPDATE_URL = "https://f2f9c29f9c574a2c-217-199-233-97.serveousercontent.com";
+        // FIX (v1.0.21): УДАЛЕНЫ хардкод-креды (Neon URL/CONN, SERVER_UPDATE_URL) — раньше они
+        // вшивались в exe и утекали КАЖДОМУ пользователю дистрибутива. Теперь всё читается
+        // из launcher.env (креды вынесены в launcher.env, НЕ хранить в исходниках!):
+        //   NEON_URL          — HTTP SQL-прокси Neon
+        //   NEON_CONN         — строка подключения PostgreSQL (секрет!)
+        //   SERVER_UPDATE_URL — базовый URL сервера обновлений (резервный источник payload)
+        // Файл ищется рядом с exe, затем в %APPDATA%\VoiceMessenger\launcher.env — см. LoadLauncherEnv().
+        private string neonUrl = "";
+        private string neonConn = "";
+        private string serverUpdateUrl = "";
 
         // State
         private string localVersion = "1.0.0";
@@ -60,6 +66,7 @@ namespace VoiceMessengerLauncher
         public LauncherForm()
         {
             InitializeComponent();
+            LoadLauncherEnv();
             LoadLocalVersion();
         }
 
@@ -237,6 +244,67 @@ namespace VoiceMessengerLauncher
             catch { }
         }
 
+        // FIX (v1.0.21): загрузка конфигурации из launcher.env — креды вынесены из исходников.
+        // Формат: простые строки KEY=VALUE (UTF-8); пустые строки и комментарии (# или ;) игнорируются.
+        // Порядок поиска: launcher.env рядом с exe → %APPDATA%\VoiceMessenger\launcher.env (фолбэк).
+        // В лог пишем ТОЛЬКО факт наличия ключей — значения (креды) в лог НЕ пишем.
+        private void LoadLauncherEnv()
+        {
+            string[] candidates = new string[]
+            {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher.env"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceMessenger", "launcher.env")
+            };
+            foreach (string envPath in candidates)
+            {
+                try
+                {
+                    if (!File.Exists(envPath))
+                    {
+                        Log("launcher.env not found: " + envPath);
+                        continue;
+                    }
+                    string[] lines = File.ReadAllLines(envPath, Encoding.UTF8);
+                    foreach (string rawLine in lines)
+                    {
+                        string line = rawLine.Trim();
+                        if (line.Length == 0 || line.StartsWith("#") || line.StartsWith(";")) continue;
+                        int eq = line.IndexOf('=');
+                        if (eq <= 0) continue;
+                        string key = line.Substring(0, eq).Trim();
+                        string val = line.Substring(eq + 1).Trim();
+                        if (val.Length == 0) continue;
+                        // первый найденный файл имеет приоритет — пустые поля не перезаписываем
+                        if (key == "NEON_URL" && neonUrl.Length == 0) neonUrl = val;
+                        else if (key == "NEON_CONN" && neonConn.Length == 0) neonConn = val;
+                        else if (key == "SERVER_UPDATE_URL" && serverUpdateUrl.Length == 0) serverUpdateUrl = val;
+                    }
+                    Log("launcher.env processed: " + envPath);
+                    if (neonUrl.Length > 0 && neonConn.Length > 0 && serverUpdateUrl.Length > 0) break;
+                }
+                catch (Exception ex)
+                {
+                    Log("launcher.env read error (" + envPath + "): " + ex.Message);
+                }
+            }
+            Log("LoadLauncherEnv: NEON_URL=" + (neonUrl.Length > 0 ? "ok" : "MISSING")
+                + ", NEON_CONN=" + (neonConn.Length > 0 ? "ok" : "MISSING")
+                + ", SERVER_UPDATE_URL=" + (serverUpdateUrl.Length > 0 ? "ok" : "MISSING"));
+        }
+
+        // FIX (v1.0.21): SHA-256 в нижнем hex — для проверки целостности пакета обновления.
+        // System.Security.Cryptography живёт в mscorlib — новых ссылок не требуется.
+        private static string ComputeSha256Hex(byte[] data)
+        {
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(data);
+                StringBuilder sb = new StringBuilder(hash.Length * 2);
+                foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
         private void LoadLocalVersion()
         {
             try
@@ -284,6 +352,16 @@ namespace VoiceMessengerLauncher
             SetProgress(25f);
             Log("CheckForUpdatesThread started. localVersion=" + localVersion);
 
+            // FIX (v1.0.21): если креды Neon не найдены в launcher.env (файла нет / ключи
+            // отсутствуют / не читается) — пропускаем проверку БД полностью и сразу
+            // уходим в автономный режим с авто-запуском локальной версии.
+            if (string.IsNullOrEmpty(neonUrl) || string.IsNullOrEmpty(neonConn))
+            {
+                Log("NEON_URL/NEON_CONN missing in launcher.env — DB update check skipped");
+                EnterOfflineMode("Креды Neon не найдены в launcher.env — проверка обновлений пропущена.");
+                return;
+            }
+
             try
             {
                 // FIX «Базовое соединение закрыто»: включаем ВСЕ современные протоколы TLS
@@ -295,14 +373,17 @@ namespace VoiceMessengerLauncher
                 }
                 catch { }
 
-                var request = (HttpWebRequest)WebRequest.Create(NEON_URL);
+                var request = (HttpWebRequest)WebRequest.Create(neonUrl);
                 request.Method = "POST";
                 request.ContentType = "application/json";
-                request.Headers["Neon-Connection-String"] = NEON_CONN;
+                request.Headers["Neon-Connection-String"] = neonConn;
                 request.Timeout = 10000;
                 request.KeepAlive = false;
 
-                string query = "{\"query\":\"SELECT version, download_url, release_notes, timestamp FROM app_releases ORDER BY timestamp DESC LIMIT 1;\"}";
+                // FIX (v1.0.21): выбираем и payload_base64 (раньше колонка НЕ выбиралась,
+                // хотя код её читал — источник из БД фактически не работал), и payload_sha256
+                // для проверки целостности обновления.
+                string query = "{\"query\":\"SELECT version, download_url, release_notes, timestamp, payload_base64, payload_sha256 FROM app_releases ORDER BY timestamp DESC LIMIT 1;\"}";
                 byte[] queryBytes = Encoding.UTF8.GetBytes(query);
                 request.ContentLength = queryBytes.Length;
 
@@ -337,6 +418,8 @@ namespace VoiceMessengerLauncher
                         string notes = latestRow.ContainsKey("release_notes") ? (latestRow["release_notes"] != null ? latestRow["release_notes"].ToString() : "") : "";
                         string payload = latestRow.ContainsKey("payload_base64") ? (latestRow["payload_base64"] != null ? latestRow["payload_base64"].ToString() : "") : "";
                         string downloadUrl = latestRow.ContainsKey("download_url") ? (latestRow["download_url"] != null ? latestRow["download_url"].ToString() : "") : "";
+                        // FIX (v1.0.21): ожидаемый SHA-256 пакета обновления (в старых релизах может отсутствовать)
+                        string expectedSha = latestRow.ContainsKey("payload_sha256") ? (latestRow["payload_sha256"] != null ? latestRow["payload_sha256"].ToString() : "") : "";
 
                         targetVersion = remoteVer;
                         releaseNotes = notes;
@@ -354,7 +437,7 @@ namespace VoiceMessengerLauncher
                                 lblChangelogText.Text = string.IsNullOrEmpty(notes) ? "Улучшения стабильности и новые функции голосовой связи." : notes;
                             }));
 
-                            ApplyUpdate(remoteVer, payload, downloadUrl);
+                            ApplyUpdate(remoteVer, payload, downloadUrl, expectedSha);
                             return;
                         }
                     }
@@ -374,18 +457,26 @@ namespace VoiceMessengerLauncher
             {
                 Log("Update check error: " + ex.ToString());
                 // Fallback if offline or network error
-                SetProgress(100f);
-                this.Invoke(new Action(() => {
-                    lblStatus.Text = "⚠️ Автономный режим (без сети)";
-                    lblStatus.ForeColor = Color.FromArgb(251, 191, 36);
-                    lblChangelogTitle.Text = "ИНФОРМАЦИЯ:";
-                    lblChangelogText.Text = "Не удалось связаться с облачной базой Neon.\nЗапуск локальной версии v" + localVersion + "...";
-                    StartAutoLaunch();
-                }));
+                EnterOfflineMode("Не удалось связаться с облачной базой Neon.");
             }
         }
 
-        private void ApplyUpdate(string newVer, string payloadBase64, string downloadUrl)
+        // FIX (v1.0.21): общий путь «автономный режим / авто-запуск локальной версии» —
+        // используется и при ошибке сети, и при отсутствии кредов в launcher.env.
+        private void EnterOfflineMode(string reason)
+        {
+            SetProgress(100f);
+            this.Invoke(new Action(() => {
+                lblStatus.Text = "⚠️ Автономный режим (без сети)";
+                lblStatus.ForeColor = Color.FromArgb(251, 191, 36);
+                lblChangelogTitle.Text = "ИНФОРМАЦИЯ:";
+                lblChangelogText.Text = reason + "\nЗапуск локальной версии v" + localVersion + "...";
+                StartAutoLaunch();
+            }));
+        }
+
+        // FIX (v1.0.21): + параметр expectedSha256 — SHA-256 пакета из БД; проверяется ДО подмены app.asar.
+        private void ApplyUpdate(string newVer, string payloadBase64, string downloadUrl, string expectedSha256)
         {
             try
             {
@@ -429,12 +520,14 @@ namespace VoiceMessengerLauncher
                     // FIX «Базовое соединение закрыто»: цепочка источников + надёжная загрузка
                     // с ретраями и докачкой. Сначала пробуем сервер мессенджера (payload из БД),
                     // затем исходный CDN-URL (catbox и т.п.)
-                    string serverSrc = SERVER_UPDATE_URL + "/api/updates/download/" + newVer;
-                    string[] sources;
-                    if (!string.IsNullOrEmpty(downloadUrl) && downloadUrl != serverSrc)
-                        sources = new string[] { serverSrc, downloadUrl };
-                    else
-                        sources = new string[] { serverSrc, downloadUrl };
+                    // FIX (v1.0.21): SERVER_UPDATE_URL берётся из launcher.env; если ключа нет —
+                    // этот источник пропускается (download_url из БД остаётся рабочим).
+                    List<string> srcList = new List<string>();
+                    if (!string.IsNullOrEmpty(serverUpdateUrl))
+                        srcList.Add(serverUpdateUrl + "/api/updates/download/" + newVer);
+                    if (!string.IsNullOrEmpty(downloadUrl))
+                        srcList.Add(downloadUrl);
+                    string[] sources = srcList.ToArray();
 
                     bool downloaded = false;
                     string lastError = "источник недоступен";
@@ -457,6 +550,38 @@ namespace VoiceMessengerLauncher
                 if (File.Exists(tempDownloadPath) && new FileInfo(tempDownloadPath).Length > 0)
                 {
                     Log("Downloaded file size: " + new FileInfo(tempDownloadPath).Length);
+
+                    // FIX (v1.0.21): проверка целостности SHA-256 ДО подмены app.asar.
+                    // Хеш считается по ФАКТИЧЕСКИМ байтам payload (неважно, из БД он или по HTTP),
+                    // сравнение регистронезависимое. Проверка выполняется ДО backup/swap,
+                    // поэтому при несовпадении app.asar вообще не трогается и восстанавливать
+                    // из .bak нечего; локальная версия остаётся прежней, приложение запускается.
+                    if (!string.IsNullOrEmpty(expectedSha256))
+                    {
+                        string actualSha = ComputeSha256Hex(File.ReadAllBytes(tempDownloadPath));
+                        if (!string.Equals(actualSha, expectedSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Хеш не совпал — обновление отклонено
+                            Log("Хеш не совпал, обновление отклонено: expected=" + expectedSha256 + " actual=" + actualSha);
+                            try { File.Delete(tempDownloadPath); } catch { }
+                            this.Invoke(new Action(() => {
+                                lblStatus.Text = "⚠️ Обновление отклонено: хеш не совпал";
+                                lblStatus.ForeColor = Color.FromArgb(251, 191, 36);
+                                lblChangelogTitle.Text = "БЕЗОПАСНОСТЬ:";
+                                lblChangelogText.Text = "Целостность пакета v" + newVer + " не подтверждена (SHA-256).\nЗапуск локальной версии v" + localVersion + "...";
+                                btnAction.Enabled = true;
+                                StartAutoLaunch();
+                            }));
+                            return;
+                        }
+                        Log("SHA-256 verified OK: " + actualSha);
+                    }
+                    else
+                    {
+                        // FIX (v1.0.21): старые релизы без хеша — предупреждение в лог, обновление продолжается (совместимость)
+                        Log("обновление без хеша — проверка пропущена");
+                    }
+
                     // Backup old asar if exists
                     string backupPath = Path.Combine(resourcesDir, "app.asar.bak");
                     if (File.Exists(asarPath))

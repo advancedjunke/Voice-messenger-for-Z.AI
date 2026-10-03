@@ -1,3 +1,14 @@
+/* NEW (v1.0.29) S: микро-полировка — плашка ошибки влетает мягким fadeIn
+   (существующий .animate-fade-in, без новых кейфреймов), глазок пароля с
+   active-прижатием, левое фоновое свечение — violet (палитра, была indigo). */
+/* NEW (v1.0.28) S: визуальная полировка экрана входа — многослойная фиолетовая
+   тень карточки, плитка-логотип purple→fuchsia, единый фиолетовый фокус полей,
+   active-прижатие вкладок/CTA, третий декоративный blur-акцент фона,
+   стеклянная пилюля P2P-футера. Индентовые градиенты заменены на палитру
+   приложения (purple→fuchsia) — новая индента НЕ добавлялась. */
+// NEW (v1.0.23) TH2: двухтемная конвертация — базовое значение = светлый тон,
+// dark: = прежний тёмный. Градиентные кнопки/акценты (indigo/purple/emerald/red)
+// и фоновые blur-пятна не тронуты.
 import React, { useState, useEffect, useRef } from 'react';
 import {
   PhoneCall, Lock, User as UserIcon, AlertCircle, LogIn, UserPlus,
@@ -89,6 +100,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       setLocalError('Введите пароль');
       return;
     }
+    // FIX (v1.0.21): при регистрации минимум 6 символов (вход остался мягким —
+    // старые аккаунты с 4-символьными паролями должны продолжать работать)
+    if (mode === 'register' && password.trim().length < 6) {
+      setLocalError('Пароль: минимум 6 символов');
+      return;
+    }
     if (mode === 'register' && password !== password2) {
       setLocalError('Пароли не совпадают');
       return;
@@ -105,7 +122,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
-        setLocalError(data.error || `Ошибка сервера (${res.status}). Попробуйте ещё раз.`);
+        // FIX (v1.0.21): 429 (rate limit) — показываем сообщение сервера из JSON,
+        // а не только сетевые ошибки; без текста от сервера — понятный фолбэк
+        const fallback =
+          res.status === 429
+            ? 'Слишком много попыток — подождите немного и попробуйте снова.'
+            : `Ошибка сервера (${res.status}). Попробуйте ещё раз.`;
+        setLocalError(data.error || fallback);
         return;
       }
       onAuthed({ token: data.token, username: data.username, avatar: data.avatar });
@@ -139,7 +162,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
     switch (nameStatus) {
       case 'checking':
         return (
-          <p className="text-[11px] mt-1.5 flex items-center gap-1 text-gray-400">
+          <p className="text-[11px] mt-1.5 flex items-center gap-1 text-gray-600 dark:text-gray-400">
             <Loader2 className="w-3 h-3 animate-spin" /> Проверяю имя…
           </p>
         );
@@ -167,39 +190,52 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950 overflow-y-auto p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-100 dark:bg-gray-950 overflow-y-auto p-4">
       {/* Фоновое свечение */}
-      <div className="pointer-events-none fixed -top-32 -left-32 w-96 h-96 bg-indigo-600/20 rounded-full blur-3xl" />
+      {/* NEW (v1.0.29) S: левое свечение — violet (палитра приложения, была indigo) */}
+      <div className="pointer-events-none fixed -top-32 -left-32 w-96 h-96 bg-violet-600/20 rounded-full blur-3xl" />
       <div className="pointer-events-none fixed -bottom-32 -right-32 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl" />
+      {/* NEW (v1.0.28) S: третий декоративный акцент — фуксия по центру за карточкой */}
+      <div className="pointer-events-none fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[32rem] h-[32rem] bg-fuchsia-500/10 rounded-full blur-3xl" aria-hidden="true" />
 
-      <div className="w-full max-w-md bg-gray-900 border border-gray-800 rounded-3xl p-8 shadow-2xl relative my-auto">
+      {/* NEW (v1.0.28) S: многослойная фиолетовая тень карточки (arbitrary) вместо
+          плоской shadow-2xl — глубина в обеих темах; волосяная линия сверху осталась */}
+      <div className="w-full max-w-md bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-3xl p-8 shadow-[0_20px_60px_-15px_rgba(168,85,247,0.3)] relative my-auto">
+        {/* NEW (v1.0.27) S: тонкая градиентная «волосяная» линия по верхнему краю
+            карточки (inset-x-6 — не задевает скругления rounded-3xl) + мягкий
+            фиолетовый оттенок тени (shadow-purple-500/10) — обе темы */}
+        <div className="absolute top-0 inset-x-6 h-px bg-gradient-to-r from-transparent via-purple-500/50 to-transparent" aria-hidden="true" />
         <div className="flex flex-col items-center text-center">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center shadow-lg shadow-indigo-500/25 mb-4">
+          {/* NEW (v1.0.28) S: плитка-логотип — градиент палитры приложения
+              (purple→fuchsia) + мягкое фиолетовое свечение (arbitrary shadow) */}
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-purple-500 to-fuchsia-500 flex items-center justify-center shadow-[0_8px_30px_rgba(168,85,247,0.35)] mb-4">
             <PhoneCall className="w-8 h-8 text-white" />
           </div>
 
-          <h2 className="text-2xl font-bold text-white tracking-tight mb-1">Voice Messenger</h2>
-          <p className="text-gray-400 text-sm mb-5">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white tracking-tight mb-1">Voice Messenger</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-sm mb-5">
             Личные сообщения и аудиозвонки в высоком качестве
           </p>
 
           {/* ─── Статус сервера (v1.0.17: раньше при недоступном сервере кнопка молчала) ─── */}
           {socketConnected ? (
-            <div className="w-full flex items-center justify-center gap-2 px-4 py-2 mb-4 bg-emerald-950/40 border border-emerald-500/25 rounded-xl text-xs text-emerald-300">
+            <div className="w-full flex items-center justify-center gap-2 px-4 py-2 mb-4 bg-emerald-100/80 dark:bg-emerald-950/40 border border-emerald-500/25 rounded-xl text-xs text-emerald-700 dark:text-emerald-300">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               Сервер на связи
             </div>
           ) : (
-            <div className="w-full px-4 py-3 mb-4 bg-red-950/40 border border-red-500/30 rounded-xl text-xs text-red-300">
+            <div className="w-full px-4 py-3 mb-4 bg-red-100/80 dark:bg-red-950/40 border border-red-500/30 rounded-xl text-xs text-red-700 dark:text-red-300">
               <div className="flex items-center justify-center gap-2 mb-1 font-semibold">
                 <WifiOff className="w-3.5 h-3.5" />
                 Нет связи с сервером
               </div>
-              <p className="text-red-400/80 leading-relaxed">
+              {/* NEW (v1.0.27) S: светлая пара текста (red-600/80), dark: — прежний red-400/80 */}
+              <p className="text-red-600/80 dark:text-red-400/80 leading-relaxed">
                 {(window as any).voiceMessenger?.rehost
                   ? 'Приложение попробует запустить сервер прямо на этом ПК. Нажмите «Перезапустить сервер» — если не поможет, проверьте интернет.'
                   : 'Вход невозможен, пока сервер недоступен. Проверьте интернет и перезапустите приложение.'}
               </p>
+              {/* NEW (v1.0.27) S: светлая пара текста кнопки (red-700), dark: — прежний red-200 */}
               <button
                 onClick={() => {
                   if ((window as any).voiceMessenger?.rehost) {
@@ -209,7 +245,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   }
                 }}
                 disabled={rehosting}
-                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-60 border border-red-500/30 rounded-lg text-red-200 transition-colors"
+                className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 disabled:opacity-60 border border-red-500/30 rounded-lg text-red-700 dark:text-red-200 transition-colors"
               >
                 {rehosting ? (
                   <>
@@ -226,14 +262,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
           )}
 
           {/* ─── Переключатель Вход / Регистрация ─── */}
-          <div className="w-full grid grid-cols-2 gap-1 p-1 bg-gray-950/70 border border-gray-800 rounded-xl mb-5">
+          {/* NEW (v1.0.28) S: активная вкладка — градиент палитры (purple→fuchsia) +
+              active-прижатие; неактивная — мягкий hover-фон вместо только цвета текста */}
+          <div className="w-full grid grid-cols-2 gap-1 p-1 bg-gray-100/70 dark:bg-gray-950/70 border border-gray-200 dark:border-gray-800 rounded-xl mb-5">
             <button
               type="button"
               onClick={() => setMode('login')}
-              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all active:scale-[0.98] ${
                 mode === 'login'
-                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-600/20'
-                  : 'text-gray-400 hover:text-gray-200'
+                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-lg shadow-purple-600/25'
+                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200/70 dark:hover:bg-white/5'
               }`}
             >
               <LogIn className="w-4 h-4" /> Вход
@@ -241,19 +279,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             <button
               type="button"
               onClick={() => setMode('register')}
-              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all ${
+              className={`flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-medium transition-all active:scale-[0.98] ${
                 mode === 'register'
-                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-600/20'
-                  : 'text-gray-400 hover:text-gray-200'
+                  ? 'bg-gradient-to-r from-purple-600 to-fuchsia-600 text-white shadow-lg shadow-purple-600/25'
+                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-200/70 dark:hover:bg-white/5'
               }`}
             >
               <UserPlus className="w-4 h-4" /> Регистрация
             </button>
           </div>
 
+          {/* NEW (v1.0.28) S: поля формы — единый фиолетовый фокус (кольцо + свечение
+              + подсветка бордера; был indigo-ring) и hover-бордер у всех трёх инпутов */}
           <form onSubmit={submit} className="w-full space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 text-left">
+              <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-2 text-left">
                 Имя пользователя
               </label>
               <div className="relative">
@@ -265,14 +305,14 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   placeholder="Например: Alex, CyberNinja…"
                   autoFocus
                   maxLength={24}
-                  className="w-full pl-11 pr-4 py-3.5 bg-gray-950/70 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-base"
+                  className="w-full pl-11 pr-4 py-3.5 bg-gray-100/70 dark:bg-gray-950/70 border border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600 rounded-xl text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/40 focus:shadow-[0_0_0_4px_rgba(168,85,247,0.10)] transition-all text-base"
                 />
               </div>
               {nameStatusBlock()}
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 text-left">
+              <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-2 text-left">
                 Пароль
               </label>
               <div className="relative">
@@ -281,14 +321,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
-                  placeholder={mode === 'login' ? 'Пароль от аккаунта' : 'Придумайте пароль (мин. 4 символа)'}
+                  placeholder={mode === 'login' ? 'Пароль от аккаунта' : 'Придумайте пароль (мин. 6 символов)'}
                   maxLength={64}
-                  className="w-full pl-11 pr-11 py-3.5 bg-gray-950/70 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-base"
+                  className="w-full pl-11 pr-11 py-3.5 bg-gray-100/70 dark:bg-gray-950/70 border border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600 rounded-xl text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/40 focus:shadow-[0_0_0_4px_rgba(168,85,247,0.10)] transition-all text-base"
                 />
+                {/* NEW (v1.0.28) S: глазок пароля — скруглённая зона с hover-фоном */}
+                {/* NEW (v1.0.29) S: + active-прижатие (как у остальных кнопок формы) */}
                 <button
                   type="button"
                   onClick={() => setShowPassword(v => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300 transition-colors"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-200/70 dark:hover:bg-white/10 transition-all active:scale-90"
                   tabIndex={-1}
                   aria-label={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
                 >
@@ -299,7 +341,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
 
             {mode === 'register' && (
               <div>
-                <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 text-left">
+                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wider mb-2 text-left">
                   Повторите пароль
                 </label>
                 <div className="relative">
@@ -310,7 +352,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                     onChange={e => setPassword2(e.target.value)}
                     placeholder="Ещё раз пароль"
                     maxLength={64}
-                    className="w-full pl-11 pr-4 py-3.5 bg-gray-950/70 border border-gray-700 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-base"
+                    className="w-full pl-11 pr-4 py-3.5 bg-gray-100/70 dark:bg-gray-950/70 border border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600 rounded-xl text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/40 focus:shadow-[0_0_0_4px_rgba(168,85,247,0.10)] transition-all text-base"
                   />
                 </div>
                 <p className="text-[11px] text-gray-500 mt-1.5 text-left">
@@ -320,16 +362,22 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             )}
 
             {shownError && (
-              <div className="flex items-start gap-2 px-4 py-3 bg-red-950/50 border border-red-500/30 rounded-xl text-sm text-red-300 text-left">
+              // NEW (v1.0.27) S: светлая пара плашки ошибки (red-50/80 + red-700 +
+              // border-red-200) — единственная оставшаяся «тёмная» плашка на светлой
+              // карточке (успех/офлайн починены в v1.0.23); dark: — прежние значения
+              // NEW (v1.0.29) S: появление — мягкий fadeIn (существующий класс)
+              <div className="flex items-start gap-2 px-4 py-3 bg-red-50/80 dark:bg-red-950/50 border border-red-200 dark:border-red-500/30 rounded-xl text-sm text-red-700 dark:text-red-300 text-left animate-fade-in">
                 <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                 <span>{shownError}</span>
               </div>
             )}
 
+            {/* NEW (v1.0.28) S: главная кнопка — градиент палитры (purple→fuchsia),
+                active-прижатие, приглушение насыщенности в disabled */}
             <button
               type="submit"
               disabled={submitting || !name.trim() || !password.trim()}
-              className="w-full py-3.5 px-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-xl shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2"
+              className="w-full py-3.5 px-4 bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 disabled:opacity-50 disabled:saturate-50 disabled:cursor-not-allowed text-white font-medium rounded-xl shadow-lg shadow-purple-600/30 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
             >
               {submitting ? (
                 <>
@@ -345,8 +393,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
             </button>
           </form>
 
-          <div className="flex items-center gap-2 mt-6 text-xs text-gray-500">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+          {/* NEW (v1.0.28) S: P2P-заметка — стеклянная пилюля с рамкой (обе темы) */}
+          <div className="inline-flex items-center gap-2 mt-6 px-3.5 py-1.5 rounded-full bg-gray-100/80 dark:bg-gray-950/80 border border-gray-200/80 dark:border-gray-800 text-xs text-gray-500">
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>P2P WebRTC аудиопоток шифруется напрямую между участниками</span>
           </div>
         </div>

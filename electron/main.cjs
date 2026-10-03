@@ -48,7 +48,7 @@ function initFileLogging() {
   try {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     logStream = fs.createWriteStream(p, { flags: 'a' });
-    logStream.write(`\n────── Запуск приложения v1.0.20 · ${new Date().toISOString()} ───────\n`);
+    logStream.write(`\n────── Запуск приложения v1.0.21 · ${new Date().toISOString()} ───────\n`);
     const wrap = (orig) => (...args) => {
       try { orig(...args); logStream.write(`[${new Date().toISOString()}] ${util.format(...args)}\n`); } catch { /* не критично */ }
     };
@@ -63,11 +63,15 @@ function initFileLogging() {
  * (или server/.env в исходниках), отдаём DATABASE_URL встроенному серверу —
  * тогда история чатов на хосте сохраняется и между перезапусками.
  *
- * v1.0.20: третьим кандидатом идёт voice-messenger.env, ВШИТЫЙ В СБОРКУ
- * (GitHub Actions записывает его из секрета NEON_DATABASE_URL). Порядок
- * приоритета: файл рядом с exe → файл из настроек приложения → вшитый
- * в сборку → server/.env из исходников. Файл без полезных переменных
- * (например, только комментарий) пропускается — смотрим следующий кандидат.
+ * v1.0.20: третьим кандидатом шла voice-messenger.env, ВШИТЫЙ В СБОРКУ
+ * (GitHub Actions записывал его из секрета NEON_DATABASE_URL).
+ * FIX (v1.0.21): файл УДАЛЁН из build.files в package.json — продакшн-креды
+ * больше не раздаются каждому установленному копию. Neon URL настраивается
+ * на ХОСТЕ через UI настроек приложения (vm:save-db-config) или server/.env.
+ * Порядок приоритета: файл рядом с exe → файл из настроек приложения →
+ * server/.env из исходников (локальная разработка). Файл без полезных
+ * переменных (например, только комментарий) пропускается — смотрим
+ * следующий кандидат.
  */
 function loadOptionalEnvFile() {
   const candidates = [];
@@ -79,7 +83,9 @@ function loadOptionalEnvFile() {
   try {
     candidates.push(path.join(app.getPath('userData'), 'voice-messenger.env'));
   } catch { /* userData недоступен */ }
-  // v1.0.20: строка подключения, вшитая в сборку (секрет NEON_DATABASE_URL)
+  // FIX (v1.0.21): кандидат оставлен только для локальной разработки —
+  // в устанавливаемую сборку voice-messenger.env больше НЕ попадает
+  // (удалён из build.files в package.json, см. комментарий к функции выше)
   candidates.push(path.join(__dirname, '../voice-messenger.env'));
   candidates.push(path.join(__dirname, '../server/.env'));
 
@@ -110,9 +116,11 @@ function loadOptionalEnvFile() {
  * всеми зависимостями. Раньше мы клали в пакет server/node_modules, но
  * electron-builder молча выбрасывал вложенные node_modules → встроенный
  * сервер падал с ERR_MODULE_NOT_FOUND → «Нет связи с сервером».
+ * FIX (v1.0.21): asar: true в package.json — лаунчер обновляет приложение
+ * заменой resources/app.asar, поэтому сервер/клиент теперь лежат ВНУТРИ архива;
+ * Electron читает их через встроенную поддержку asar (fs запатчен).
  */
 function getServerEntryPath() {
-  // asar: false → в пакете сервер лежит рядом как обычные файлы
   const candidates = [
     path.join(__dirname, '../server/dist/index.bundle.mjs'),                  // исходники / unpacked
     path.join(__dirname, '../server/dist/index.js'),                          // исходники без бандла
@@ -253,12 +261,18 @@ function createWindow(serverTarget) {
     },
   });
 
-  // Automatically grant microphone permissions for WebRTC calls
+  // FIX (v1.0.21): разрешаем ТОЛЬКО медиа-разрешения (микрофон для WebRTC-звонков).
+  // Раньше else-ветка тоже вызывала callback(true) — условие было мёртвым, и ЛЮБОЕ
+  // разрешение (геолокация, уведомления, midi и т.д.) одобрялось автоматически.
+  // Отклонённые типы пишем в main.log.
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'media') {
+    if (permission === 'media' || permission === 'audio' || permission === 'audioCapture') {
       return callback(true);
     }
-    callback(true);
+    let pageUrl = 'unknown';
+    try { pageUrl = webContents && webContents.getURL ? webContents.getURL() : 'unknown'; } catch { /* окно могло закрыться */ }
+    console.warn(`[Permissions] ❌ Отклонено разрешение '${permission}' для ${pageUrl}`);
+    return callback(false);
   });
 
   // Smooth appearance once content is parsed — no flickering!
@@ -336,22 +350,32 @@ ipcMain.handle('vm:save-db-config', (_e, rawUrl) => {
   } catch (err) {
     return { ok: false, error: 'Не удалось сохранить файл настроек: ' + (err?.message || err) };
   }
-  // Чистый перезапуск: убираем дочерний сервер-процесс и стартуем заново
-  stopServerChild();
-  app.relaunch();
-  app.exit(0);
+  // FIX (v1.0.21): сначала возвращаем результат рендереру — раньше app.exit(0)
+  // вызывался ДО return, invoke не резолвился и UI показывал «ошибку» при
+  // успешном сохранении. Перезапуск откладываем на 300 мс, чтобы ответ успел дойти.
+  setTimeout(() => {
+    stopServerChild(); // чистый перезапуск: убираем дочерний сервер-процесс
+    app.relaunch();
+    app.exit(0);
+  }, 300);
   return { ok: true };
 });
 
 app.whenReady().then(async () => {
   initFileLogging();
-  console.log(`🚀 Voice Messenger v1.0.20 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
+  console.log(`🚀 Voice Messenger v1.0.21 (Electron ${process.versions.electron}, Node ${process.versions.node})`);
   const serverTarget = await resolveServerTarget();
   createWindow(serverTarget);
 
-  app.on('activate', () => {
+  app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow(serverTarget);
+      // FIX (v1.0.21): раньше окно пересоздавалось с serverTarget, захваченным при
+      // старте приложения — адрес мог «протухнуть» (сервер с тех пор перезапускался
+      // или сменился хост в LAN). Заново прогоняем цепочку разрешения адреса;
+      // при ошибке остаёмся на последнем успешном адресе.
+      let target = serverTarget;
+      try { target = await resolveServerTarget(); } catch { /* остаёмся на прежнем адресе */ }
+      createWindow(target);
     }
   });
 });

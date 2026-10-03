@@ -1,9 +1,9 @@
-/** QA-бот: Bob онлайн, шлёт «печатает…» и сообщение найденному пользователю QA */
+/** QA-бот: Bob онлайн, шлёт «печатает…» и сообщение найденному пользователю QA (v1.0.22) */
 import { io } from 'socket.io-client';
 const socket = io('http://localhost:3001', { transports: ['websocket'] });
 let qaId = null;
 socket.on('connect', () => {
-  console.log('[QABot] connected:', socket.id);
+  console.log('[QABot] connected:', socket.id, '(bot v1.0.22)');
   socket.emit('user:register', { username: 'Bob' });
 });
 socket.on('users:update', (users) => {

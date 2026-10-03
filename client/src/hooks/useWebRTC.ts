@@ -4,31 +4,63 @@ import type { ActiveCall } from '../types.js';
 import { audioTone } from '../utils/audioTone.js';
 
 // STUN + Free Public TURN (OpenRelay) for NAT traversal across different networks
-const ICE_SERVERS: RTCConfiguration = {
-  iceServers: [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
-    { urls: ['stun:stun.cloudflare.com:3478'] },
-    { urls: ['stun:stun.nextcloud.com:443'] },
-    {
-      urls: [
-        'stun:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443',
-        'turn:openrelay.metered.ca:443?transport=tcp',
-      ],
-      username: 'openrelay',
-      credential: 'openrelay',
-    },
-  ],
-  iceCandidatePoolSize: 10,
-};
+// FIX (v1.0.22) F3: TURN-креды больше не только захардкожены — их можно задать
+// при сборке через Vite env (см. client/.env.example):
+//   VITE_TURN_URL      — один или несколько URL через запятую, например
+//                        "turn:turn.example.com:3478,turns:turn.example.com:5349?transport=tcp"
+//   VITE_TURN_USERNAME — логин TURN
+//   VITE_TURN_CREDENTIAL — пароль TURN
+// Если env не заданы (или заданы не полностью) — фолбэк на публичный OpenRelay,
+// т.е. поведение по умолчанию НЕ меняется.
+function buildIceServers(): RTCConfiguration {
+  const turnUrls = String(import.meta.env.VITE_TURN_URL || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const turnUsername = String(import.meta.env.VITE_TURN_USERNAME || '').trim();
+  const turnCredential = String(import.meta.env.VITE_TURN_CREDENTIAL || '').trim();
+
+  const turnServer: RTCIceServer =
+    turnUrls.length > 0 && turnUsername && turnCredential
+      ? { urls: turnUrls, username: turnUsername, credential: turnCredential }
+      : {
+          // Фолбэк — публичный OpenRelay (как было до v1.0.22)
+          urls: [
+            'stun:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp',
+          ],
+          username: 'openrelay',
+          credential: 'openrelay',
+        };
+
+  return {
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
+      { urls: ['stun:stun.cloudflare.com:3478'] },
+      { urls: ['stun:stun.nextcloud.com:443'] },
+      turnServer,
+    ],
+    iceCandidatePoolSize: 10,
+  };
+}
+
+const ICE_SERVERS: RTCConfiguration = buildIceServers();
 
 // How long to wait for WebRTC ICE to connect before falling back to relay (ms)
 const ICE_TIMEOUT_MS = 6000;
 
 type AudioMode = 'webrtc' | 'relay';
 
-export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
+// FIX (v1.0.21): колбэк уведомлений из App (тосты) вместо блокирующих alert()
+export type NotifyFn = (text: string, kind?: 'info' | 'error' | 'success') => void;
+
+export function useWebRTC(
+  socket: Socket | null,
+  currentUserId: string | null,
+  onNotify?: NotifyFn
+) {
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [incomingCall, setIncomingCall] = useState<{
     callerId: string;
@@ -251,6 +283,9 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
   const switchToRelay = useCallback((partnerId: string) => {
     console.log('[Relay] ⚡ Switching to Socket.io audio relay (WebRTC P2P failed)');
     setAudioMode('relay');
+    // FIX (v1.0.21): relay-звонок считается соединённым сразу — таймер и индикаторы
+    // должны работать, пока P2P не состоялся (статус мог остаться 'connecting')
+    setActiveCall(prev => (prev && prev.status !== 'connected' ? { ...prev, status: 'connected' } : prev));
 
     // Close WebRTC peer connection — we don't need it
     if (pcRef.current) {
@@ -541,6 +576,7 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
 
     // Caller receives accepted answer
     const handleCallAccepted = async ({
+      targetUserId,
       answer,
     }: {
       targetUserId: string;
@@ -551,14 +587,20 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       if (pcRef.current) {
         await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
         await drainCandidateQueue(pcRef.current);
-        setActiveCall(prev => (prev ? { ...prev, status: 'connected' } : null));
+        // FIX (v1.0.21): 'connected' больше НЕ ставим здесь — только 'connecting';
+        // финальный статус выставит oniceconnectionstatechange (или relay)
+        setActiveCall(prev => (prev ? { ...prev, status: 'connecting' } : null));
+        // FIX (v1.0.22) F1: звонок ПРИНЯТ — только теперь запускаем ICE-фолбэк-таймер.
+        // targetUserId = сокет принявшего = наш partnerId (фолбэк — activeCall).
+        startIceFailTimeout(targetUserId || activeCall?.partnerId || '');
       }
     };
 
     // Call was rejected
     const handleCallRejected = ({ reason }: { reason?: string }) => {
       cleanupCall(true);
-      alert(reason || 'Собеседник отклонил звонок');
+      // FIX (v1.0.21): тост вместо блокирующего alert()
+      onNotify?.(reason || 'Собеседник отклонил звонок', 'error');
     };
 
     // Received ICE Candidate
@@ -603,10 +645,38 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       socket.off('call:ice_candidate', handleIceCandidate);
       socket.off('call:ended', handleCallEnded);
     };
-  }, [socket, activeCall, incomingCall, cleanupCall]);
+  }, [socket, activeCall, incomingCall, cleanupCall, onNotify]);
+
+  // FIX (v1.0.22) F1: единая точка запуска ICE-фолбэк-таймера. Раньше таймер
+  // стартовал в setupPeerConnection сразу на call:initiate (стадия гудков) и при
+  // долгом ответе собеседника (>6с) срабатывал ДО call:accepted — вызывал
+  // преждевременный switchToRelay и relay-звук во время гудков. Теперь таймер
+  // включается только ПОСЛЕ принятия звонка: у звонящего — в handleCallAccepted,
+  // у отвечающего — сразу в answerCall (звонок уже принят). Relay-фолбэк ПОСЛЕ
+  // принятия звонка работает как раньше.
+  const startIceFailTimeout = (partnerId: string) => {
+    if (!partnerId) return;
+    if (iceTimeoutRef.current) {
+      clearTimeout(iceTimeoutRef.current);
+    }
+    iceTimeoutRef.current = window.setTimeout(() => {
+      iceTimeoutRef.current = null;
+      const pc = pcRef.current;
+      const state = pc?.iceConnectionState;
+      if (
+        pc &&
+        audioModeRef.current !== 'relay' &&
+        state !== 'connected' &&
+        state !== 'completed'
+      ) {
+        console.log(`[WebRTC] ⏰ ICE timeout (${ICE_TIMEOUT_MS}ms), switching to relay`);
+        switchToRelay(partnerId);
+      }
+    }, ICE_TIMEOUT_MS);
+  };
 
   /** Set up WebRTC peer connection with ICE timeout fallback to relay */
-  const setupPeerConnection = (partnerId: string): RTCPeerConnection => {
+  const setupPeerConnection = (partnerId: string, withIceTimeout = true): RTCPeerConnection => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcRef.current = pc;
 
@@ -642,8 +712,6 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       }
     };
 
-    let iceConnected = false;
-
     pc.onconnectionstatechange = () => {
       console.log('[WebRTC] Connection state:', pc.connectionState);
     };
@@ -653,8 +721,10 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       console.log('[WebRTC] ICE Connection state:', state);
 
       if (state === 'connected' || state === 'completed') {
-        iceConnected = true;
         setAudioMode('webrtc');
+        // FIX (v1.0.21): 'connected' ставится ТОЛЬКО когда ICE реально соединился —
+        // таймер длительности больше не считает время до установки соединения
+        setActiveCall(prev => (prev && prev.status !== 'connected' ? { ...prev, status: 'connected' } : prev));
         console.log('[WebRTC] ✅ P2P connected! Audio via WebRTC');
         if (iceTimeoutRef.current) {
           clearTimeout(iceTimeoutRef.current);
@@ -683,13 +753,11 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       }
     };
 
-    // Timeout: if ICE hasn't connected in N seconds, switch to relay
-    iceTimeoutRef.current = window.setTimeout(() => {
-      if (!iceConnected && audioModeRef.current !== 'relay') {
-        console.log(`[WebRTC] ⏰ ICE timeout (${ICE_TIMEOUT_MS}ms), switching to relay`);
-        switchToRelay(partnerId);
-      }
-    }, ICE_TIMEOUT_MS);
+    // Timeout: if ICE hasn't connected in N seconds, switch to relay.
+    // FIX (v1.0.22) F1: таймер запускается здесь ТОЛЬКО для отвечающего
+    // (answerCall — звонок уже принят); у звонящего его включает
+    // handleCallAccepted по call:accepted (см. startIceFailTimeout).
+    if (withIceTimeout) startIceFailTimeout(partnerId);
 
     return pc;
   };
@@ -727,7 +795,8 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
       }
 
       // 2. Initialize RTCPeerConnection with STUN & TURN + relay fallback
-      const pc = setupPeerConnection(partnerId);
+      // FIX (v1.0.22) F1: БЕЗ ICE-таймера — он стартует только после call:accepted
+      const pc = setupPeerConnection(partnerId, false);
 
       // Create and send SDP Offer
       const offer = await pc.createOffer({
@@ -742,7 +811,8 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
     } catch (err: any) {
       console.error('[WebRTC] Failed to start call:', err);
       cleanupCall(false);
-      alert('Не удалось получить доступ к микрофону: ' + (err.message || err));
+      // FIX (v1.0.21): тост вместо блокирующего alert()
+      onNotify?.('Не удалось получить доступ к микрофону: ' + (err.message || err), 'error');
     }
   };
 
@@ -759,7 +829,8 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
         partnerName: callerName,
         partnerAvatar: incomingCall.callerAvatar,
         isCaller: false,
-        status: 'connected',
+        // FIX (v1.0.21): сначала 'connecting' — 'connected' выставит ICE-колбэк
+        status: 'connecting',
       });
       setIncomingCall(null);
 
@@ -799,7 +870,8 @@ export function useWebRTC(socket: Socket | null, currentUserId: string | null) {
     } catch (err: any) {
       console.error('[WebRTC] Failed to answer call:', err);
       cleanupCall(false);
-      alert('Ошибка при ответе на звонок: ' + (err.message || err));
+      // FIX (v1.0.21): тост вместо блокирующего alert()
+      onNotify?.('Ошибка при ответе на звонок: ' + (err.message || err), 'error');
     }
   };
 

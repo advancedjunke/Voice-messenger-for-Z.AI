@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { ChatMessage, KnownUser, User } from './types.js';
+import { ChatMessage, KnownUser, User, GroupInfo } from './types.js';
 
 dotenv.config();
 
@@ -89,6 +89,76 @@ function persistLocalUsers() {
   }, 400);
 }
 
+// ────────────────────────────────────────────────────────────────
+// NEW (v1.0.29) GC: ФАЙЛОВОЕ ХРАНИЛИЩЕ ГРУПП (groups.json).
+// Зеркалит паттерн accounts.json: группы переживают рестарт сервера.
+// Сам кэш (Map id → группа) живёт в index.ts (groupsById) — db.ts только
+// читает/пишет файл. Запись дебаунсится (~250мс), атомарно через .tmp+rename.
+// ────────────────────────────────────────────────────────────────
+const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
+
+// Загрузка групп с диска. Отсутствующий/битый файл — не ошибка: [] и работа дальше.
+export function loadGroupsFromDisk(): GroupInfo[] {
+  try {
+    if (!fs.existsSync(GROUPS_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
+    if (!Array.isArray(raw?.groups)) return [];
+    // мягкая валидация каждой записи: id/имя/участники обязательны
+    const groups: GroupInfo[] = [];
+    for (const g of raw.groups) {
+      if (!g || typeof g.id !== 'string' || !g.id || typeof g.name !== 'string' || !Array.isArray(g.members)) continue;
+      const members = g.members.map((m: unknown) => String(m || '').trim().slice(0, 24)).filter((m: string) => m.length > 0);
+      // NEW (v1.0.30) GR: статусы прочтения переживают рестарт. Нормализация
+      // при загрузке: остаются только записи о ТЕКУЩИХ участниках (без учёта
+      // регистра) с числовым временем > 0; старые файлы без readState — ок
+      // (поле остаётся undefined, логика в index.ts терпит его отсутствие).
+      let readState: Record<string, number> | undefined;
+      if (g.readState && typeof g.readState === 'object') {
+        const memberKeys = new Set(members.map((m: string) => m.toLowerCase()));
+        const clean: Record<string, number> = {};
+        for (const [k, v] of Object.entries(g.readState)) {
+          const name = String(k || '').trim();
+          if (!name || !memberKeys.has(name.toLowerCase())) continue;
+          const t = Number(v);
+          if (Number.isFinite(t) && t > 0) clean[name] = Math.floor(t);
+        }
+        if (Object.keys(clean).length > 0) readState = clean;
+      }
+      groups.push({
+        id: g.id,
+        name: g.name,
+        createdBy: String(g.createdBy || g.members[0] || ''),
+        members,
+        createdAt: Number(g.createdAt) || Date.now(),
+        ...(readState ? { readState } : {}),
+      });
+    }
+    console.log(`👥 [Groups] Загружено групп: ${groups.length} (${GROUPS_FILE})`);
+    return groups;
+  } catch (err: any) {
+    console.warn('[Groups] Не удалось прочитать groups.json:', err?.message || err);
+    return [];
+  }
+}
+
+let groupsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+// Сохранение ВСЕХ групп на диск (дебаунс ~250мс — бережём диск при серии мутаций).
+// Вызывается из index.ts после каждого изменения состава/названия группы.
+export function saveGroupsToDisk(groups: GroupInfo[]) {
+  if (groupsSaveTimer) clearTimeout(groupsSaveTimer);
+  groupsSaveTimer = setTimeout(() => {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      const data = { savedAt: Date.now(), groups };
+      const tmp = GROUPS_FILE + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tmp, GROUPS_FILE);
+    } catch (err: any) {
+      console.warn('[Groups] Не удалось сохранить groups.json:', err?.message || err);
+    }
+  }, 250);
+}
+
 if (connectionString) {
   dbStatus.usingPostgres = true;
   dbStatus.host = parseDbHost(connectionString);
@@ -108,11 +178,18 @@ if (connectionString) {
     pool.on('connect', (client) => {
       client.on('error', (err) => {
         console.warn('[Neon DB] Client socket error handled gracefully:', err.message);
+        // FIX (v1.0.21) C3: соединение потеряно — сбрасываем флаг, чтобы
+        // /api/db/status не врал, и фоновый вотчер (15с) поднял базу заново
+        isDbConnected = false;
+        dbStatus.connected = false;
       });
     });
 
     pool.on('error', (err) => {
       console.warn('[Neon DB] Unexpected error on idle client handled:', err.message);
+      // FIX (v1.0.21) C3: см. выше — не даём статусу «connected» замереть после потери соединения
+      isDbConnected = false;
+      dbStatus.connected = false;
     });
   } catch (err) {
     console.error('[Neon DB] Failed to create connection pool', err);
@@ -159,11 +236,35 @@ function queuePendingMessage(item: { msg: ChatMessage; conversationKey: string }
   console.log(`📬 [Neon DB] Сообщение поставлено в очередь (всего: ${pendingMessages.length})`);
 }
 
+// FIX (v1.0.21) B4: очередь удалений на время «сна» базы. Раньше пометка
+// «удалено» молча ТЕРЯЛАСЬ, если база была недоступна (в отличие от сообщений) —
+// после пробуждения «удалённое» сообщение снова всплывало в истории.
+const PENDING_DELETES_MAX = 1000;
+const pendingDeletes: Array<{ messageId: string; conversationKey: string }> = [];
+
+function queuePendingDelete(item: { messageId: string; conversationKey: string }) {
+  if (pendingDeletes.length >= PENDING_DELETES_MAX) pendingDeletes.shift();
+  pendingDeletes.push(item);
+  console.log(`🗑️ [Neon DB] Удаление поставлено в очередь (всего: ${pendingDeletes.length})`);
+}
+
+// NEW (v1.0.24) E1: очередь правок сообщений на время «сна» базы — тот же
+// loss-proof паттерн, что и у удалений (B4): правка не теряется, а доезжает
+// до базы после пробуждения.
+const PENDING_EDITS_MAX = 1000;
+const pendingEdits: Array<{ messageId: string; conversationKey: string; text: string; editedAt: number }> = [];
+
+function queuePendingEdit(item: { messageId: string; conversationKey: string; text: string; editedAt: number }) {
+  if (pendingEdits.length >= PENDING_EDITS_MAX) pendingEdits.shift();
+  pendingEdits.push(item);
+  console.log(`✏️ [Neon DB] Правка поставлена в очередь (всего: ${pendingEdits.length})`);
+}
+
 async function insertMessageRow(msg: ChatMessage, conversationKey: string) {
   await withRetry(() => pool!.query(
     `INSERT INTO messages (id, conversation_key, sender_id, sender_name, sender_avatar, recipient_id, text, media_url, media_type, duration, timestamp,
-                           reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted, forwarded_from)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                           reply_to_id, reply_to_sender, reply_to_text, reply_to_media_type, deleted, forwarded_from, read, edited, edited_at, reactions)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      ON CONFLICT (id) DO NOTHING`,
     [
       msg.id,
@@ -183,7 +284,51 @@ async function insertMessageRow(msg: ChatMessage, conversationKey: string) {
       msg.replyTo?.mediaType || null,
       Boolean(msg.deleted),
       msg.forwardedFrom || null,
+      // FIX (v1.0.21) B5: новое сообщение по определению непрочитано (false);
+      // если сообщение стояло в очереди и успело стать прочитанным — сохранится true
+      Boolean(msg.read),
+      // NEW (v1.0.24) E1: факт и время правки текста
+      Boolean(msg.edited),
+      msg.editedAt || null,
+      // NEW (v1.0.25) R1: реакции на момент вставки (JSON-строка; обычно null)
+      msg.reactions && Object.keys(msg.reactions).length > 0 ? JSON.stringify(msg.reactions) : null,
     ]
+  ));
+}
+
+// FIX (v1.0.21) B4: мягкое удаление вынесено в отдельную функцию — используется
+// и напрямую, и при досылке очереди удалений
+async function applyDeleteRow(item: { messageId: string; conversationKey: string }) {
+  await withRetry(() => pool!.query(
+    `UPDATE messages
+     SET deleted = TRUE, text = NULL, media_url = NULL, duration = NULL
+     WHERE id = $1 AND conversation_key = $2`,
+    [item.messageId, item.conversationKey]
+  ));
+}
+
+// NEW (v1.0.24) E1: применение правки текста — используется и напрямую,
+// и при досылке очереди правок после «пробуждения» базы
+async function applyEditRow(item: { messageId: string; conversationKey: string; text: string; editedAt: number }) {
+  await withRetry(() => pool!.query(
+    `UPDATE messages
+     SET text = $3, edited = TRUE, edited_at = $4
+     WHERE id = $1 AND conversation_key = $2 AND deleted = FALSE`,
+    [item.messageId, item.conversationKey, item.text, item.editedAt]
+  ));
+}
+
+// NEW (v1.0.25) R1: применение нового слепка реакций сообщения — используется
+// и напрямую, и при досылке очереди реакций. Пишем СЛЕПОК ЦЕЛИКОМ (не дельту):
+// сервер хранит актуальный msg.reactions в памяти, база просто догоняет.
+// deleted = FALSE — реакция не должна «воскрешать» удалённые сообщения
+// (как у правок E1).
+async function applyReactionRow(item: { messageId: string; conversationKey: string; reactions: Record<string, string[]> }) {
+  await withRetry(() => pool!.query(
+    `UPDATE messages
+     SET reactions = $3
+     WHERE id = $1 AND conversation_key = $2 AND deleted = FALSE`,
+    [item.messageId, item.conversationKey, JSON.stringify(item.reactions)]
   ));
 }
 
@@ -191,23 +336,96 @@ export async function flushPendingMessages() {
   if (!pool || !isDbConnected || pendingMessages.length === 0) return;
   const batch = pendingMessages.splice(0, pendingMessages.length);
   let saved = 0;
-  for (const item of batch) {
+  // FIX (v1.0.21) B1 (критичное): раньше при первой же ошибке в очередь
+  // возвращалось ТОЛЬКО одно сообщение, а остаток батча МОЛЧА ТЕРЯЛСЯ.
+  // Теперь в очередь возвращается весь несохранённый хвост — с сохранением порядка.
+  for (let i = 0; i < batch.length; i++) {
     try {
-      await insertMessageRow(item.msg, item.conversationKey);
+      await insertMessageRow(batch[i].msg, batch[i].conversationKey);
       saved++;
     } catch (err: any) {
-      console.warn('[Neon DB] Очередь: сообщение не сохранилось, возвращаю в конец очереди:', err?.message || err);
-      queuePendingMessage(item);
+      console.warn('[Neon DB] Очередь: сообщение не сохранилось, возвращаю остаток батча в очередь:', err?.message || err);
+      pendingMessages.unshift(...batch.slice(i));
       break; // база снова недоступна — продолжим на следующей попытке
     }
   }
   if (saved > 0) console.log(`📬 [Neon DB] Из очереди сохранено сообщений: ${saved} (осталось: ${pendingMessages.length})`);
 }
 
-// Фоновая досылка: раз в 30 секунд пробуем сохранить недоставленное
+// FIX (v1.0.21) B4: досылка накопившихся удалений — тот же loss-proof паттерн, что и в B1
+export async function flushPendingDeletes() {
+  if (!pool || !isDbConnected || pendingDeletes.length === 0) return;
+  const batch = pendingDeletes.splice(0, pendingDeletes.length);
+  let applied = 0;
+  for (let i = 0; i < batch.length; i++) {
+    try {
+      await applyDeleteRow(batch[i]);
+      applied++;
+    } catch (err: any) {
+      console.warn('[Neon DB] Очередь удалений: не удалось применить, возвращаю остаток в очередь:', err?.message || err);
+      pendingDeletes.unshift(...batch.slice(i));
+      break;
+    }
+  }
+  if (applied > 0) console.log(`🗑️ [Neon DB] Из очереди применено удалений: ${applied} (осталось: ${pendingDeletes.length})`);
+}
+
+// NEW (v1.0.24) E1: досылка накопившихся правок — тот же loss-proof паттерн
+export async function flushPendingEdits() {
+  if (!pool || !isDbConnected || pendingEdits.length === 0) return;
+  const batch = pendingEdits.splice(0, pendingEdits.length);
+  let applied = 0;
+  for (let i = 0; i < batch.length; i++) {
+    try {
+      await applyEditRow(batch[i]);
+      applied++;
+    } catch (err: any) {
+      console.warn('[Neon DB] Очередь правок: не удалось применить, возвращаю остаток в очередь:', err?.message || err);
+      pendingEdits.unshift(...batch.slice(i));
+      break;
+    }
+  }
+  if (applied > 0) console.log(`✏️ [Neon DB] Из очереди применено правок: ${applied} (осталось: ${pendingEdits.length})`);
+}
+
+// NEW (v1.0.25) R1: очередь слепков реакций на время «сна» базы — loss-proof
+// паттерн, как у правок (E1). Слепки копятся, если база спит; после пробуждения
+// доезжают ВСЕ по порядку (последний слепок побеждает — итоговое состояние верно).
+const PENDING_REACTIONS_MAX = 1000;
+const pendingReactions: Array<{ messageId: string; conversationKey: string; reactions: Record<string, string[]> }> = [];
+
+function queuePendingReaction(item: { messageId: string; conversationKey: string; reactions: Record<string, string[]> }) {
+  if (pendingReactions.length >= PENDING_REACTIONS_MAX) pendingReactions.shift();
+  pendingReactions.push(item);
+  console.log(`💜 [Neon DB] Реакция поставлена в очередь (всего: ${pendingReactions.length})`);
+}
+
+export async function flushPendingReactions() {
+  if (!pool || !isDbConnected || pendingReactions.length === 0) return;
+  const batch = pendingReactions.splice(0, pendingReactions.length);
+  let applied = 0;
+  for (let i = 0; i < batch.length; i++) {
+    try {
+      await applyReactionRow(batch[i]);
+      applied++;
+    } catch (err: any) {
+      console.warn('[Neon DB] Очередь реакций: не удалось применить, возвращаю остаток в очередь:', err?.message || err);
+      pendingReactions.unshift(...batch.slice(i));
+      break;
+    }
+  }
+  if (applied > 0) console.log(`💜 [Neon DB] Из очереди применено реакций: ${applied} (осталось: ${pendingReactions.length})`);
+}
+
+// Фоновая досылка: раз в 30 секунд пробуем доставить недоставленное
 setInterval(() => {
-  if (isDbConnected && pendingMessages.length > 0) {
+  if (isDbConnected && (pendingMessages.length > 0 || pendingDeletes.length > 0 || pendingEdits.length > 0 || pendingReactions.length > 0)) {
     flushPendingMessages().catch(() => { /* не критично */ });
+    flushPendingDeletes().catch(() => { /* не критично */ });
+    flushPendingEdits().catch(() => { /* не критично */ });
+    // NEW (v1.0.25) R1: реакции досылаем ПОСЛЕДНИМИ (после сообщений/удалений/
+    // правок) — чтобы слепок реакций не мог опередить само сообщение
+    flushPendingReactions().catch(() => { /* не критично */ });
   }
 }, 30000).unref?.();
 
@@ -236,6 +454,16 @@ export async function initDatabase() {
         ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_token TEXT;
       `);
 
+      // FIX (v1.0.21) B3: уникальность имён БЕЗ учёта регистра на уровне БД
+      // (Alice и alice — один аккаунт). Отдельный try: если в базе уже есть
+      // дубли с разным регистром, индекс не создастся — но инициализация
+      // из-за этого падать не должна.
+      try {
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci ON users (LOWER(username))`);
+      } catch (idxErr: any) {
+        console.warn('[Neon DB] Уникальный индекс LOWER(username) не создан (возможно, есть дубли имён с разным регистром):', idxErr?.message || idxErr);
+      }
+
       // Create messages table
       await client.query(`
         CREATE TABLE IF NOT EXISTS messages (
@@ -260,6 +488,13 @@ export async function initDatabase() {
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE;
         -- v1.0.12: пересылка сообщений (имя первоначального отправителя)
         ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from VARCHAR(100);
+        -- FIX (v1.0.21) B5: прочтение сообщений (персистентные «✓✓»)
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS read BOOLEAN DEFAULT FALSE;
+        -- NEW (v1.0.24) E1: редактирование отправленных сообщений (факт + время)
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited BOOLEAN DEFAULT FALSE;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at BIGINT;
+        -- NEW (v1.0.25) R1: реакции-эмодзи на сообщения (JSON: эмодзи → [username])
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions TEXT;
         CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_key);
       `);
 
@@ -274,6 +509,8 @@ export async function initDatabase() {
           timestamp BIGINT NOT NULL
         );
         ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS payload_base64 TEXT;
+        -- FIX (v1.0.21) C4: SHA-256 payload — лаунчер проверяет целостность скачивания
+        ALTER TABLE app_releases ADD COLUMN IF NOT EXISTS payload_sha256 TEXT;
         ALTER TABLE app_releases ALTER COLUMN download_url DROP NOT NULL;
       `);
 
@@ -282,15 +519,19 @@ export async function initDatabase() {
 
       // v1.0.19: если аккаунты успели создаться в файловом режиме (Neon был
       // недоступен на старте), переносим их в базу — ничего не теряем.
+      // FIX (v1.0.21) B3: try вынесен внутрь цикла — один конфликтный аккаунт
+      // (например, дубликат с другим регистром) не должен прерывать перенос остальных.
       try {
         for (const u of localUsers.values()) {
           if (!u.passwordHash) continue;
-          await client.query(
-            `INSERT INTO users (username, avatar, password_hash, auth_token, last_seen)
+          try {
+            await client.query(
+              `INSERT INTO users (username, avatar, password_hash, auth_token, last_seen)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (username) DO NOTHING`,
-            [u.username, u.avatar || null, u.passwordHash || null, u.authToken || null, u.lastSeen || Date.now()]
-          );
+              [u.username, u.avatar || null, u.passwordHash || null, u.authToken || null, u.lastSeen || Date.now()]
+            );
+          } catch { /* дубликат/конфликт — пропускаем этого пользователя */ }
         }
       } catch (mErr: any) {
         console.warn('[Neon DB] Не удалось перенести локальные аккаунты:', mErr.message);
@@ -298,6 +539,12 @@ export async function initDatabase() {
 
       // v1.0.20: досылаем сообщения, накопившиеся, пока база просыпалась
       await flushPendingMessages();
+      // FIX (v1.0.21) B4: досылаем и накопившиеся удаления (после сообщений —
+      // чтобы «удалённое» не вставилось обратно уже помеченным)
+      await flushPendingDeletes();
+      // NEW (v1.0.24) E1: досылаем накопившиеся правки (после удалений — чтобы
+      // правка не перезатёрла текст сообщения, уже удалённого во «сне» базы)
+      await flushPendingEdits();
 
       return true;
     } finally {
@@ -322,23 +569,35 @@ export async function initDatabaseWithRetry(): Promise<boolean> {
     return false;
   }
   const delays = [0, 4000, 10000, 20000, 40000];
+  let connected = false;
   for (let i = 0; i < delays.length; i++) {
     if (delays[i] > 0) {
       console.log(`[Neon DB] Повторная попытка подключения через ${delays[i] / 1000}с…`);
       await new Promise(r => setTimeout(r, delays[i]));
     }
-    if (await initDatabase()) return true;
+    if (await initDatabase()) {
+      connected = true;
+      break;
+    }
   }
-  console.warn('[Neon DB] База недоступна — работаем в файловом режиме, подключение проверяем раз в 15 секунд.');
+  if (!connected) console.warn('[Neon DB] База недоступна — работаем в файловом режиме, подключение проверяем раз в 15 секунд.');
+  // FIX (v1.0.21) C3: вотчер теперь ПОСТОЯННЫЙ. Раньше он останавливался после
+  // первого успешного подключения — и если база «усыплялась» посреди сессии
+  // (pool error → флаг сброшен), сервер навсегда оставался в файловом режиме.
   const timer = setInterval(() => {
-    if (isDbConnected) { clearInterval(timer); return; }
-    initDatabase().then(ok => { if (ok) { clearInterval(timer); console.log('✅ [Neon DB] База данных подключилась (после повторных попыток).'); } });
+    if (isDbConnected) return; // подключено — просто следим дальше
+    initDatabase().then(ok => {
+      if (ok) console.log('✅ [Neon DB] Соединение с базой восстановлено.');
+    });
   }, 15000);
   timer.unref?.();
-  return false;
+  return connected;
 }
 
-export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string, authToken?: string) {
+// FIX (v1.0.21) B3: возвращает false ТОЛЬКО при unique violation (имя уже
+// занято — гонка регистрации). Прочие ошибки проглатываются как раньше,
+// чтобы не менять поведение существующих вызовов.
+export async function dbSaveUser(username: string, avatar?: string, passwordHash?: string, authToken?: string): Promise<boolean> {
   if (!pool || !isDbConnected) {
     // Fallback: локальное файловое хранилище (режим без БД)
     const prev = localUsers.get(username.toLowerCase());
@@ -350,7 +609,7 @@ export async function dbSaveUser(username: string, avatar?: string, passwordHash
       lastSeen: Date.now(),
     });
     persistLocalUsers();
-    return;
+    return true;
   }
   try {
     await withRetry(() => pool!.query(
@@ -363,8 +622,15 @@ export async function dbSaveUser(username: string, avatar?: string, passwordHash
          last_seen = EXCLUDED.last_seen`,
       [username, avatar || null, passwordHash || null, authToken || null, Date.now()]
     ));
-  } catch (err) {
+    return true;
+  } catch (err: any) {
+    // 23505 = unique_violation: сработал индекс LOWER(username) — имя занято
+    if (err?.code === '23505') {
+      console.warn(`[Neon DB] Имя «${username}» уже занято (unique violation).`);
+      return false;
+    }
     console.error('[Neon DB] Ошибка сохранения пользователя:', err);
+    return true;
   }
 }
 
@@ -440,16 +706,69 @@ export async function dbSaveMessage(msg: ChatMessage, conversationKey: string) {
 
 // v1.0.11: пометить сообщение удалённым (контент стираем, сам факт остаётся)
 export async function dbMarkMessageDeleted(conversationKey: string, messageId: string) {
+  if (!pool) return; // БД не настроена — некуда писать
+  if (!isDbConnected) {
+    // FIX (v1.0.21) B4: база спит — удаление в очередь, как сообщения. Раньше просто return.
+    queuePendingDelete({ conversationKey, messageId });
+    return;
+  }
+  try {
+    await applyDeleteRow({ conversationKey, messageId });
+  } catch (err) {
+    console.error('[Neon DB] Ошибка удаления сообщения:', err);
+    // FIX (v1.0.21) B4: не теряем — вернём в очередь и досылаем позже
+    queuePendingDelete({ conversationKey, messageId });
+  }
+}
+
+// NEW (v1.0.24) E1: отредактировать текст своего сообщения (факт правки
+// фиксируем в колонках edited/edited_at). Loss-proof паттерн очереди — как у
+// удалений: база спит → правка в очередь и доедет после пробуждения.
+export async function dbEditMessage(conversationKey: string, messageId: string, text: string, editedAt: number) {
+  if (!pool) return; // БД не настроена — некуда писать
+  const item = { conversationKey, messageId, text, editedAt };
+  if (!isDbConnected) {
+    queuePendingEdit(item);
+    return;
+  }
+  try {
+    await applyEditRow(item);
+  } catch (err) {
+    console.error('[Neon DB] Ошибка правки сообщения:', err);
+    queuePendingEdit(item); // не теряем — досылаем позже
+  }
+}
+
+// NEW (v1.0.25) R1: сохранить слепок реакций сообщения (loss-proof очередь,
+// если база спит). Без БД — no-op: актуальные реакции живут в памяти сервера
+// (messageHistory) и никуда не пропадают до рестарта.
+export async function dbSetReactions(conversationKey: string, messageId: string, reactions: Record<string, string[]>) {
+  if (!pool) return; // БД не настроена — некуда писать
+  const item = { conversationKey, messageId, reactions };
+  if (!isDbConnected) {
+    queuePendingReaction(item);
+    return;
+  }
+  try {
+    await applyReactionRow(item);
+  } catch (err) {
+    console.error('[Neon DB] Ошибка сохранения реакций:', err);
+    queuePendingReaction(item); // не теряем — досылаем позже
+  }
+}
+
+// FIX (v1.0.21) B5: отметить всю беседу с собеседником прочитанной (persist «✓✓»).
+// Вызывается fire-and-forget из обработчика chat:read в index.ts.
+export async function dbMarkConversationRead(conversationKey: string, partnerName: string) {
   if (!pool || !isDbConnected) return;
   try {
     await withRetry(() => pool!.query(
-      `UPDATE messages
-       SET deleted = TRUE, text = NULL, media_url = NULL, duration = NULL
-       WHERE id = $1 AND conversation_key = $2`,
-      [messageId, conversationKey]
+      `UPDATE messages SET read = TRUE
+       WHERE conversation_key = $1 AND LOWER(sender_name) = LOWER($2) AND deleted = FALSE`,
+      [conversationKey, partnerName]
     ));
   } catch (err) {
-    console.error('[Neon DB] Ошибка удаления сообщения:', err);
+    console.error('[Neon DB] Ошибка отметки «прочитано»:', err);
   }
 }
 
@@ -501,16 +820,22 @@ export async function dbGetHistory(conversationKey: string, limit = 200): Promis
       `SELECT id, sender_id as "senderId", sender_name as "senderName", sender_avatar as "senderAvatar", recipient_id as "recipientId",
               text, media_url as "mediaUrl", media_type as "mediaType", duration, timestamp,
               reply_to_id as "replyToId", reply_to_sender as "replyToSender", reply_to_text as "replyToText",
-              reply_to_media_type as "replyToMediaType", deleted, forwarded_from as "forwardedFrom"
+              reply_to_media_type as "replyToMediaType", deleted, forwarded_from as "forwardedFrom", read,
+              edited, edited_at as "editedAt", reactions
        FROM messages
        WHERE conversation_key = $1
-       ORDER BY timestamp ASC
+       ORDER BY timestamp DESC
        LIMIT $2`,
       [conversationKey, limit]
     ));
+    // FIX (v1.0.21) B2: раньше «ASC LIMIT 200» отдавал СТАРЕЙШИЕ 200 сообщений
+    // (у длинных бесед история «застревала» в древности). Теперь берём НОВЕЙШИЕ
+    // 200 (DESC) и разворачиваем обратно в хронологию — как у кольцевого буфера в памяти.
+    // FIX (v1.0.21) B5: колонка read подхватывается и маппится в ChatMessage.read.
+    res.rows.reverse();
     // v1.0.11: восстанавливаем вложенную структуру replyTo из плоских колонок
     return res.rows.map((row: any) => {
-      const { replyToId, replyToSender, replyToText, replyToMediaType, ...rest } = row;
+      const { replyToId, replyToSender, replyToText, replyToMediaType, reactions, ...rest } = row;
       if (replyToId) {
         rest.replyTo = {
           id: replyToId,
@@ -518,6 +843,16 @@ export async function dbGetHistory(conversationKey: string, limit = 200): Promis
           text: replyToText || undefined,
           mediaType: replyToMediaType || undefined,
         };
+      }
+      // NEW (v1.0.25) R1: распаковываем JSON-слепок реакций (эмодзи → [username]).
+      // Битый JSON (не должен случаться) — просто игнорируем.
+      if (reactions) {
+        try {
+          const parsed = JSON.parse(reactions);
+          if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+            rest.reactions = parsed;
+          }
+        } catch { /* ignore */ }
       }
       return rest as ChatMessage;
     });
@@ -532,6 +867,8 @@ export interface AppRelease {
   version: string;
   downloadUrl?: string;
   payloadBase64?: string;
+  // FIX (v1.0.21) C4: SHA-256 payload (hex, lowercase) — проверка целостности на стороне лаунчера
+  payloadSha256?: string;
   releaseNotes?: string;
   timestamp: number;
 }
@@ -545,15 +882,16 @@ export async function dbGetLatestRelease(includePayload = false): Promise<AppRel
     return includePayload ? latest : { ...latest, payloadBase64: undefined } as AppRelease;
   }
   try {
+    // FIX (v1.0.21) C2: обёрнуто в withRetry, как остальные запросы (Neon может просыпаться)
     const fields = includePayload
-      ? `id, version, download_url as "downloadUrl", payload_base64 as "payloadBase64", release_notes as "releaseNotes", timestamp`
-      : `id, version, download_url as "downloadUrl", (payload_base64 IS NOT NULL) as "hasPayload", release_notes as "releaseNotes", timestamp`;
-    const res = await pool.query(
+      ? `id, version, download_url as "downloadUrl", payload_base64 as "payloadBase64", payload_sha256 as "payloadSha256", release_notes as "releaseNotes", timestamp`
+      : `id, version, download_url as "downloadUrl", (payload_base64 IS NOT NULL) as "hasPayload", payload_sha256 as "payloadSha256", release_notes as "releaseNotes", timestamp`;
+    const res = await withRetry(() => pool!.query(
       `SELECT ${fields}
        FROM app_releases
        ORDER BY timestamp DESC
        LIMIT 1`
-    );
+    ));
     return res.rows[0] || null;
   } catch (err) {
     console.error('[Neon DB] Ошибка проверки обновлений:', err);
@@ -566,13 +904,14 @@ export async function dbGetReleasePayload(version: string): Promise<string | nul
     return localReleases.get(version)?.payloadBase64 || null;
   }
   try {
-    const res = await pool.query(
+    // FIX (v1.0.21) C2: с ретраем, как остальные запросы
+    const res = await withRetry(() => pool!.query(
       `SELECT payload_base64 as "payloadBase64"
        FROM app_releases
        WHERE version = $1
        LIMIT 1`,
       [version]
-    );
+    ));
     return res.rows[0]?.payloadBase64 || null;
   } catch (err) {
     console.error('[Neon DB] Ошибка получения файла релиза:', err);
@@ -586,7 +925,8 @@ export async function dbDeleteRelease(version: string): Promise<boolean> {
     return localReleases.delete(version);
   }
   try {
-    await pool.query(`DELETE FROM app_releases WHERE version = $1`, [version]);
+    // FIX (v1.0.21) C2: с ретраем, как остальные запросы
+    await withRetry(() => pool!.query(`DELETE FROM app_releases WHERE version = $1`, [version]));
     return true;
   } catch (err) {
     console.error('[Neon DB] Ошибка удаления релиза:', err);
@@ -598,7 +938,9 @@ export async function dbPublishRelease(
   version: string,
   downloadUrl = '',
   releaseNotes = '',
-  payloadBase64 = ''
+  payloadBase64 = '',
+  // FIX (v1.0.21) C4: SHA-256 payload (hex, lowercase) — контракт с publish-release.cjs и лаунчером
+  payloadSha256 = ''
 ): Promise<boolean> {
   if (!pool || !isDbConnected) {
     // Fallback: локальное хранилище релизов
@@ -607,22 +949,25 @@ export async function dbPublishRelease(
       version,
       downloadUrl: downloadUrl || undefined,
       payloadBase64: payloadBase64 || undefined,
+      payloadSha256: payloadSha256 || undefined,
       releaseNotes,
       timestamp: Date.now(),
     });
     return true;
   }
   try {
-    await pool.query(
-      `INSERT INTO app_releases (version, download_url, release_notes, payload_base64, timestamp)
-       VALUES ($1, $2, $3, $4, $5)
+    // FIX (v1.0.21) C2: с ретраем, как остальные запросы
+    await withRetry(() => pool!.query(
+      `INSERT INTO app_releases (version, download_url, release_notes, payload_base64, payload_sha256, timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (version) DO UPDATE SET
          download_url = EXCLUDED.download_url,
          release_notes = EXCLUDED.release_notes,
          payload_base64 = EXCLUDED.payload_base64,
+         payload_sha256 = EXCLUDED.payload_sha256,
          timestamp = EXCLUDED.timestamp`,
-      [version, downloadUrl || null, releaseNotes, payloadBase64 || null, Date.now()]
-    );
+      [version, downloadUrl || null, releaseNotes, payloadBase64 || null, payloadSha256 || null, Date.now()]
+    ));
     return true;
   } catch (err) {
     console.error('[Neon DB] Ошибка публикации релиза:', err);

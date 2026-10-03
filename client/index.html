@@ -2,6 +2,18 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      /* NEW (v1.0.23) TH1: тема применяется ДО первой отрисовки — без вспышки.
+         По умолчанию тёмная (идентичность приложения), выбор хранится в vm_theme. */
+      (function () {
+        try {
+          var t = localStorage.getItem('vm_theme');
+          document.documentElement.classList.add(t === 'light' ? 'light' : 'dark');
+        } catch (e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icon.png" />
